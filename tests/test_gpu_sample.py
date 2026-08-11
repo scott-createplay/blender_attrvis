@@ -104,10 +104,31 @@ r_n = gpu_sample.sample_evaluated(grid, "Normal", "Point", world_space=True)
 check("sample Normal", r_n is not None and r_n[2] == 'FLOAT_VECTOR')
 if r_n:
     a2 = gpu_overlay._refresh_arrows(viz, md, r_n[0], r_n[1], r_n[2])
-    # background: GPU batch build may fail; geometry prep should still succeed
     check("arrows on Normal produce line count",
           a2.get("n", 0) > 0 or a2.get("empty") is not True,
           str(a2.get("n")))
+
+# Surface tris
+node_builder.set_input(md, "Display", "Surface")
+node_builder.set_input(md, "Domain", "Point")
+surf = gpu_sample.build_surface_tris(md, style="Heat")
+check("surface tris build", surf is not None)
+if surf:
+    spos, scols, sdt, ntri = surf
+    check("surface tri verts multiple of 3", len(spos) % 3 == 0, str(len(spos)))
+    check("surface colors match verts", len(scols) == len(spos))
+    check("surface has triangles", ntri > 0, str(ntri))
+    print(f"  surface stats: tris={ntri} verts={len(spos)} dtype={sdt}")
+
+node_builder.set_input(md, "Domain", "Face")
+node_builder.set_input(md, "Attribute", "face_id")
+surf_f = gpu_sample.build_surface_tris(md, style="Random")
+check("surface face_id build", surf_f is not None and surf_f[3] > 0)
+
+# Restore Markers for GN fallback check
+node_builder.set_input(md, "Display", "Markers")
+node_builder.set_input(md, "Attribute", "heat")
+node_builder.set_input(md, "Domain", "Point")
 
 # Flag exists after register (already registered via import side? need register)
 av.register()

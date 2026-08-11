@@ -295,6 +295,127 @@ def sample_visualizer_targets(
     return positions, values, dtype
 
 
+def _domain_element_colors(
+    values: np.ndarray,
+    dtype: str,
+    style: str,
+    *,
+    vmin=None,
+    vmax=None,
+    seed: int = 0,
+):
+    from . import gpu_color
+    return gpu_color.values_to_colors(
+        values, dtype, style, vmin=vmin, vmax=vmax, seed=seed,
+    )
+
+
+def build_surface_tris(
+    md,
+    *,
+    style: str = "Heat",
+    vmin=None,
+    vmax=None,
+    seed: int = 0,
+    inflate: float = 0.002,
+    face_cap: int = 200000,
+) -> Optional[Tuple[np.ndarray, np.ndarray, str, int]]:
+    """Build world-space TRI vertex arrays for GPU Surface ink.
+
+    Returns (positions Mx3, colors Mx4, dtype, n_tris) where M = 3 * n_tris,
+    or None if unavailable. Edge domain is weakly supported (skipped).
+    """
+    try:
+        target = node_builder.get_input(md, "Target")
+        scope = node_builder.get_input(md, "Scope")
+        attr = node_builder.get_input(md, "Attribute") or ""
+        domain_ui = node_builder.menu_input_name(md, "Domain") or "Point"
+    except Exception:
+        return None
+    if not attr or domain_ui == "Edge":
+        return None
+
+    meshes = iter_watch_meshes(target, scope)
+    if not meshes:
+        return None
+
+    pos_chunks = []
+    col_chunks = []
+    dtype = None
+    n_tris_total = 0
+
+    for obj in meshes:
+        ev, me = _evaluated_mesh(obj)
+        if me is None:
+            continue
+        try:
+            me.calc_loop_triangles()
+        except Exception:
+            pass
+        tris = me.loop_triangles
+        if not tris:
+            continue
+
+        # Sample domain values on this mesh
+        result = sample_evaluated(obj, attr, domain_ui, world_space=False)
+        if result is None:
+            continue
+        _local_pos, values, dt = result
+        dtype = dt
+        colors = _domain_element_colors(
+            values, dt, style, vmin=vmin, vmax=vmax, seed=seed,
+        )
+
+        # Local positions + normals for inflate
+        n_verts = len(me.vertices)
+        cos = np.empty(n_verts * 3, dtype=np.float32)
+        me.vertices.foreach_get("co", cos)
+        cos = cos.reshape(-1, 3)
+        nrms = np.empty(n_verts * 3, dtype=np.float32)
+        me.vertices.foreach_get("normal", nrms)
+        nrms = nrms.reshape(-1, 3)
+
+        # Cap faces if huge
+        tri_list = list(tris)
+        if len(tri_list) > face_cap:
+            step = int(np.ceil(len(tri_list) / face_cap))
+            tri_list = tri_list[::step]
+
+        m = len(tri_list) * 3
+        out_pos = np.empty((m, 3), dtype=np.float32)
+        out_col = np.empty((m, 4), dtype=np.float32)
+        k = 0
+        for tri in tri_list:
+            verts = tri.vertices  # 3 vert indices
+            poly_i = tri.polygon_index
+            loops = tri.loops
+            for j in range(3):
+                vi = verts[j]
+                p = cos[vi] + nrms[vi] * float(inflate)
+                out_pos[k] = p
+                if domain_ui == "Point":
+                    out_col[k] = colors[vi]
+                elif domain_ui == "Face":
+                    out_col[k] = colors[poly_i]
+                elif domain_ui == "Corner":
+                    out_col[k] = colors[loops[j]]
+                else:
+                    out_col[k] = colors[0] if len(colors) else (0.7, 0.7, 0.7, 1.0)
+                k += 1
+
+        # to world
+        out_pos = _to_world(out_pos, ev.matrix_world)
+        pos_chunks.append(out_pos)
+        col_chunks.append(out_col)
+        n_tris_total += len(tri_list)
+
+    if not pos_chunks or dtype is None:
+        return None
+    positions = np.concatenate(pos_chunks, axis=0)
+    colors = np.concatenate(col_chunks, axis=0)
+    return positions, colors, dtype, n_tris_total
+
+
 def buffer_stats(result: SampleResult) -> dict[str, Any]:
     positions, values, dtype = result
     stats: dict[str, Any] = {

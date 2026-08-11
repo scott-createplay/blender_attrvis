@@ -828,7 +828,7 @@ def _set_enabled(self, value):
         except Exception:
             pass
         # GPU overlay draws the ink; keep GN carrier hidden to avoid double draw.
-        if enabled and use_gpu and display in ("Markers", "Arrows"):
+        if enabled and use_gpu and display in ("Markers", "Surface", "Arrows"):
             md.show_viewport = False
         else:
             md.show_viewport = enabled

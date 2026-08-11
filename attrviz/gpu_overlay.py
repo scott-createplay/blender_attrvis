@@ -1,10 +1,10 @@
-"""AttrViz GPU overlay — Solid-mode unlit Markers + Arrows (Stage B).
+"""AttrViz GPU overlay — Solid-mode unlit Markers / Surface / Arrows.
 
 POST_VIEW draw handler. Behind scene.attrviz_gpu_markers (default off)
 so GN+materials remain the default until validated.
 
-Markers → colored points. Arrows → short lines from vector attrs
-(non-vector → draw nothing; honesty rule from 0.5.x).
+Markers → points. Surface → false-color mesh tris. Arrows → vector lines
+(non-vector → draw nothing). Tags stay on the BLF prototype.
 """
 from __future__ import annotations
 
@@ -16,11 +16,10 @@ from gpu_extras.batch import batch_for_shader
 from . import gpu_color, gpu_sample, node_builder
 
 _handle = None
-# cache keyed per visualizer object pointer
 _caches: dict = {}
 
 VECTORISH = frozenset({'FLOAT_VECTOR', 'FLOAT2'})
-GPU_DISPLAYS = frozenset({"Markers", "Arrows"})
+GPU_DISPLAYS = frozenset({"Markers", "Surface", "Arrows"})
 
 
 def _scene_gpu_on(scene=None) -> bool:
@@ -52,7 +51,7 @@ def _gpu_visualizers(scene):
 
 
 def _suppress_gn_carriers(scene):
-    """When GPU overlay on, hide GN carrier mesh for Markers/Arrows."""
+    """When GPU overlay on, hide GN carrier mesh for Markers/Surface/Arrows."""
     from . import visualizers, viz_modifier
     use_gpu = _scene_gpu_on(scene)
     for obj in visualizers(scene):
@@ -234,6 +233,36 @@ def _refresh_arrows(obj, md, positions, values, dtype):
     }
 
 
+def _refresh_surface(obj, md, style, rmin, rmax, seed):
+    built = gpu_sample.build_surface_tris(
+        md, style=style, vmin=rmin, vmax=rmax, seed=seed,
+    )
+    if built is None:
+        return {"batch": None, "n": 0, "prim": "TRIS", "empty": True}
+    positions, colors, dtype, n_tris = built
+    if n_tris == 0:
+        return {"batch": None, "n": 0, "prim": "TRIS", "empty": True}
+    try:
+        batch, shader, mode = _build_batch(positions, colors, prim='TRIS')
+    except Exception:
+        return {
+            "batch": None,
+            "n": n_tris,
+            "prim": "TRIS",
+            "colors": colors,
+            "dtype": dtype,
+        }
+    return {
+        "batch": batch,
+        "shader": shader,
+        "mode": mode,
+        "colors": colors,
+        "n": n_tris,
+        "prim": "TRIS",
+        "dtype": dtype,
+    }
+
+
 def _refresh_viz(obj, md, display, cap=50000):
     try:
         density = float(node_builder.get_input(md, "Density") or 1.0)
@@ -244,10 +273,23 @@ def _refresh_viz(obj, md, display, cap=50000):
             node_builder.get_input(md, "Range Min") or 0.0)
         rmax = None if auto else float(
             node_builder.get_input(md, "Range Max") or 1.0)
-        length = float(node_builder.get_input(md, "Length") or 0.08)
     except Exception:
         density, seed, style = 1.0, 0, "Heat"
-        rmin, rmax, length = None, None, 0.08
+        rmin, rmax = None, None
+
+    if display == "Surface":
+        # Cache key from attr/domain/style; n from built tris
+        key = _viz_cache_key(obj, md, display, 0, extra=("surface", style))
+        cached = _caches.get(obj.as_pointer())
+        if cached and cached.get("key") == key and (
+                cached.get("batch") is not None or cached.get("empty")):
+            return cached
+        entry = _refresh_surface(obj, md, style, rmin, rmax, seed)
+        # Rebuild key with real tri count
+        entry["key"] = _viz_cache_key(
+            obj, md, display, entry.get("n", 0), extra=("surface", style))
+        _caches[obj.as_pointer()] = entry
+        return entry
 
     result = gpu_sample.sample_visualizer_targets(
         md, density=density, seed=seed, cap=cap,
@@ -287,10 +329,29 @@ def draw_callback_view():
 
     _suppress_gn_carriers(scene)
 
-    gpu.state.depth_test_set('LESS_EQUAL')
-    gpu.state.depth_mask_set(False)
+    rows = _gpu_visualizers(scene)
+    # Surfaces first (write depth), then points/lines (test only)
+    surfaces = [(o, m, d) for o, m, d in rows if d == "Surface"]
+    others = [(o, m, d) for o, m, d in rows if d != "Surface"]
 
-    for obj, md, display in _gpu_visualizers(scene):
+    gpu.state.depth_test_set('LESS_EQUAL')
+
+    gpu.state.depth_mask_set(True)
+    for obj, md, display in surfaces:
+        entry = _refresh_viz(obj, md, display)
+        if entry is None or entry.get("batch") is None:
+            continue
+        shader = entry["shader"]
+        shader.bind()
+        if entry.get("mode") == "uniform":
+            cols = entry.get("colors")
+            if cols is not None and len(cols):
+                mean = cols.mean(axis=0)
+                shader.uniform_float("color", tuple(float(c) for c in mean))
+        entry["batch"].draw(shader)
+
+    gpu.state.depth_mask_set(False)
+    for obj, md, display in others:
         entry = _refresh_viz(obj, md, display)
         if entry is None or entry.get("batch") is None:
             continue
@@ -352,9 +413,9 @@ def register():
         bpy.types.Scene.attrviz_gpu_markers = bpy.props.BoolProperty(
             name="GPU Overlay",
             description=(
-                "Draw Markers (points) and Arrows (lines) as unlit GPU ink "
-                "in Solid mode; hides GN carrier meshes. Materials path "
-                "remains for other Displays and when this is off"
+                "Draw Markers / Surface / Arrows as unlit GPU ink in Solid "
+                "mode; hides GN carrier meshes. Tags stay on the text "
+                "prototype. Materials path remains when this is off"
             ),
             default=False,
             update=_on_gpu_flag_update,

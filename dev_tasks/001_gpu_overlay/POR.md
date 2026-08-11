@@ -19,7 +19,7 @@ If Python draw-handler depth/color cannot meet the bar, **escalate** mid-task to
 | AttrViz 0.5.2 materials path (emission + `vizcol`) | Working; keep as fallback until GPU Displays land |
 | Tags GPU prototype (`attrviz/tags_draw.py`) | Exists (`POST_PIXEL` text); reuse sampling ideas, not as the geometry ink path |
 | Standalone probe (`dev_tasks/001_gpu_overlay/probe/`) | **Gate A met**; Phase 3 depth/FACE/vectors in probe |
-| Real AttrViz GPU overlay module | **Markers + Arrows GPU** (flag: GPU Overlay); Tags depth / Surface still open |
+| Real AttrViz GPU overlay module | **Markers + Surface + Arrows GPU**; Tags (text) deferred |
 
 **Current AttrViz commit (context):** `61309c5` — AttrViz 0.5.2.
 
@@ -312,7 +312,7 @@ Not a hard gate for Stage B Markers.
 
 **Author**
 
-- [ ] Surface: choose approach — (a) GPU face tint / mesh batch, (b) hybrid keep GN mesh + GPU color, or (c) defer with written rationale. Prefer (a) if Phase 3 face path scaled.
+- [x] Surface: choose approach — (a) GPU face tint / mesh batch, (b) hybrid keep GN mesh + GPU color, or (c) defer with written rationale. Prefer (a) if Phase 3 face path scaled. **Done: (a) TRIS batch + domain colors + inflate.**
 - [ ] Live DistLook: `entity_id` / `dist_*` via AttrViz on sample_scene_3 mesh (Solid), side-by-side sheet language.
 - [ ] Thin probe to a thin wrapper or README pointing at `attrviz` module; avoid permanent duplicate stacks.
 - [ ] EEVEE/pixel or buffer tests where meaningful; **do not** rely only on “vizcol exists.”
