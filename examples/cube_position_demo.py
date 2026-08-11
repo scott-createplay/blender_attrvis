@@ -23,13 +23,13 @@ for obj in list(bpy.data.objects):
 bpy.ops.mesh.primitive_cube_add(size=2.0)
 cube = bpy.context.active_object
 
-# exactly what the RMB menu does: enumerate + auto-pick
-infos, has_faces = av.evaluated_attributes(cube)
-dtype = next(t for n, _d, t in infos if n == "position")
-style, display = av.auto_pick(dtype, has_faces)
+# exactly what the RMB menu does: domain submenu + auto-pick
+by, has_faces = av.attributes_by_domain(cube)
+dtype = next(t for n, t in by["Point"] if n == "position")
+style, display = av.auto_pick("Point", dtype, has_faces)
 viz = av.add_visualizer(bpy.context, target=cube,
-                        attribute="position", style=style,
-                        display=display)
+                        attribute="position", domain="Point",
+                        style=style, display=display)
 viz.hide_render = False
 print(f"[attrviz] auto-picked style={style} display={display}")
 

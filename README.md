@@ -41,13 +41,14 @@ visualizer never re-evaluates the watched object.
 
 | Axis | Options | Notes |
 | --- | --- | --- |
-| **Style** | `Heat` \| `RGB` | Heat = float through an editable color ramp (auto or pinned range). RGB = vector mapped per-component, auto-normalized. |
-| **Display** | `Markers` \| `Surface` \| `Arrows` | Markers = colored spheres per element. Surface = the watched surface tinted per vertex (a slightly inflated copy — the original is untouched). Arrows = cones aligned to a vector attribute. |
+| **Domain** | `Point` \| `Edge` \| `Face` \| `Corner` | Localizes the read — Houdini-style. Face attrs draw on faces, not smeared to points. |
+| **Color** | `Heat` \| `RGB` \| `Random` | Heat = scalar through a ramp. RGB = vector channels. Random = stable hash color per element id (ints / categorical). |
+| **Type** | `Markers` \| `Surface` \| `Arrows` \| `Tags` | Markers / Surface / Arrows are GN carriers. **Tags** = GPU sprite+text prototype (capped; path toward a compiled display plugin). |
 
-The RMB menu auto-picks: vectors → RGB, meshes with faces → Surface,
-point clouds / curves → Markers. Everything is overridable in the Viz
-panel — each visualizer owns its own engine copy, so color-ramp edits
-are per visualizer.
+**RMB → Visualize Attribute** opens **domain submenus**, then attributes
+on that domain. Auto-pick is domain-aware (e.g. Face + int → Random +
+Surface). Overridable in the Viz panel; each visualizer owns its engine
+copy. Use **Enabled** to show one at a time — no compositing.
 
 Scope: a visualizer can watch a single object, or a whole collection
 through its `Scope` socket — one visualizer covering many objects.
@@ -76,10 +77,10 @@ blender --background --factory-startup --python-exit-code 1 --python tests/headl
 
 ## Roadmap
 
-- Tag mode: numeric value glyphs at elements (native GN text, capped)
+- Tags: digit-atlas shader + depth occlusion (compiled display plugin)
 - HUD overlay for non-geometry data (custom properties, transforms)
 - VDB / volume grid visualization
-- Domain-aware display beyond points (corner/face/edge)
+- Stronger Edge surface / wire display
 
 ## License
 
