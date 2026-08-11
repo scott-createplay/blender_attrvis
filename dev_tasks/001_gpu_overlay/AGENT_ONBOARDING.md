@@ -1,6 +1,6 @@
 # Agent onboarding — GPU overlay (task 001)
 
-**Status: Stage B — GPU Markers code landed (user Solid verify pending)**
+**Status: Stage B — Markers + Arrows GPU user-verified; Tags/Surface open**
 
 **Source of truth:** [`POR.md`](POR.md)
 

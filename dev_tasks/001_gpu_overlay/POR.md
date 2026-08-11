@@ -294,17 +294,17 @@ Not a hard gate for Stage B Markers.
 
 **Author**
 
-- [ ] Arrows: line/cone-lite from vector attrs; non-vector → draw nothing (honesty rule from 0.5.x).
-- [ ] Tags: keep BLF labels but prefer depth-aware placement / `POST_VIEW` where possible; share sampler with Markers.
-- [ ] Style sockets (Heat / RGB / Random) applied in GPU color map (parity with GN intent, not pixel-identical ramp required in v1).
+- [x] Arrows: line/cone-lite from vector attrs; non-vector → draw nothing (honesty rule from 0.5.x).
+- [ ] Tags: keep BLF labels but prefer depth-aware placement / `POST_VIEW` where possible; share sampler with Markers. **Deferred** — BLF `POST_PIXEL` prototype remains; depth-aware Tags is follow-on.
+- [x] Style sockets (Heat / RGB / Random) applied in GPU color map (parity with GN intent, not pixel-identical ramp required in v1).
 
 **Validate**
 
-- [ ] Normal / `flow` arrows in Solid.
-- [ ] Tags still capped; no Material Preview required for Markers/Arrows.
-- [ ] Screenshots in `references/`.
+- [x] Normal / `flow` arrows in Solid (user: two viz, independent Arrow Colors).
+- [x] Tags still capped; no Material Preview required for Markers/Arrows.
+- [ ] Screenshots in `references/` — Markers saved; Arrows screenshot optional if user pastes one.
 
-**Exit:** Markers + Arrows GPU; Tags improved or explicitly deferred items listed.
+**Exit:** Markers + Arrows GPU done; Tags depth deferred (listed above).
 
 ---
 
