@@ -1,4 +1,4 @@
-# AttrViz
+# blender_attrviz
 
 Houdini-style attribute visualizers for Blender — first-class, native,
 and zero-mutation. Right-click any object, pick an attribute, see it.
