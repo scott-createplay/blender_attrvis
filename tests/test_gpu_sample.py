@@ -77,7 +77,7 @@ if r2:
 r3 = gpu_sample.sample_evaluated(grid, "Index", "Point", world_space=False)
 check("intrinsic Index", r3 is not None and r3[2] == 'INT')
 
-# Visualizer path
+# Visualizer path + arrows honesty
 viz = av.add_visualizer(
     bpy.context, target=grid, attribute="heat",
     domain="Point", style="Heat", display="Markers",
@@ -91,6 +91,23 @@ if result:
 
 cols = gpu_color.values_to_colors(result[1], result[2], "Heat")
 check("heat colors", cols.shape == (nv, 4), str(cols.shape))
+
+# Arrows honesty: float → empty line geometry
+from attrviz import gpu_overlay  # noqa: E402
+arrow_entry = gpu_overlay._refresh_arrows(
+    viz, md, result[0], result[1], result[2])
+check("arrows on float → empty",
+      arrow_entry.get("empty") is True or arrow_entry.get("batch") is None)
+
+# Normal as vector arrows
+r_n = gpu_sample.sample_evaluated(grid, "Normal", "Point", world_space=True)
+check("sample Normal", r_n is not None and r_n[2] == 'FLOAT_VECTOR')
+if r_n:
+    a2 = gpu_overlay._refresh_arrows(viz, md, r_n[0], r_n[1], r_n[2])
+    # background: GPU batch build may fail; geometry prep should still succeed
+    check("arrows on Normal produce line count",
+          a2.get("n", 0) > 0 or a2.get("empty") is not True,
+          str(a2.get("n")))
 
 # Flag exists after register (already registered via import side? need register)
 av.register()

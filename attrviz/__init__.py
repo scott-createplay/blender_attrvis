@@ -670,7 +670,7 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
         if not _viz_display_shading_ok(space):
             _ensure_viz_display_shading(context)
         row = layout.row(align=True)
-        row.prop(context.scene, "attrviz_gpu_markers", text="GPU Markers",
+        row.prop(context.scene, "attrviz_gpu_markers", text="GPU Overlay",
                  toggle=True)
         if gpu_on:
             row.label(text="Solid OK", icon='SHADING_SOLID')
@@ -827,8 +827,8 @@ def _set_enabled(self, value):
             display = node_builder.menu_input_name(md, "Display")
         except Exception:
             pass
-        # GPU Markers draw the ink; keep GN carrier hidden to avoid double draw.
-        if enabled and use_gpu and display == "Markers":
+        # GPU overlay draws the ink; keep GN carrier hidden to avoid double draw.
+        if enabled and use_gpu and display in ("Markers", "Arrows"):
             md.show_viewport = False
         else:
             md.show_viewport = enabled
