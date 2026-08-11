@@ -57,6 +57,23 @@ def hash_colors(ids: np.ndarray) -> np.ndarray:
     return rgba
 
 
+def rgb_colors(values: np.ndarray) -> np.ndarray:
+    """Vector → RGB from abs-normalized components."""
+    v = np.asarray(values, dtype=np.float32)
+    if v.ndim == 1:
+        v = v.reshape(-1, 1)
+    rgb = np.zeros((len(v), 3), dtype=np.float32)
+    cols = min(3, v.shape[1])
+    rgb[:, :cols] = np.abs(v[:, :cols])
+    norms = np.linalg.norm(rgb, axis=1, keepdims=True)
+    norms = np.maximum(norms, 1e-6)
+    rgb = rgb / norms
+    rgba = np.empty((len(v), 4), dtype=np.float32)
+    rgba[:, :3] = 0.2 + 0.8 * rgb
+    rgba[:, 3] = 1.0
+    return rgba
+
+
 def values_to_colors(values: np.ndarray, dtype: str) -> np.ndarray:
     """Dispatch float→heat, int→hash, vector→RGB abs-normalized."""
     if dtype == 'FLOAT':
@@ -64,20 +81,7 @@ def values_to_colors(values: np.ndarray, dtype: str) -> np.ndarray:
     if dtype in ('INT', 'BOOLEAN', 'INT8'):
         return hash_colors(values)
     if dtype in ('FLOAT_VECTOR', 'FLOAT2'):
-        v = np.asarray(values, dtype=np.float32)
-        if v.ndim == 1:
-            v = v.reshape(-1, 1)
-        # take first 3 comps; abs + normalize per-row for visibility
-        rgb = np.zeros((len(v), 3), dtype=np.float32)
-        cols = min(3, v.shape[1])
-        rgb[:, :cols] = np.abs(v[:, :cols])
-        norms = np.linalg.norm(rgb, axis=1, keepdims=True)
-        norms = np.maximum(norms, 1e-6)
-        rgb = rgb / norms
-        rgba = np.empty((len(v), 4), dtype=np.float32)
-        rgba[:, :3] = 0.2 + 0.8 * rgb
-        rgba[:, 3] = 1.0
-        return rgba
+        return rgb_colors(values)
     if dtype in ('FLOAT_COLOR', 'BYTE_COLOR'):
         v = np.asarray(values, dtype=np.float32)
         if v.shape[-1] >= 4:

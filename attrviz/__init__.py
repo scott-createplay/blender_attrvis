@@ -16,6 +16,7 @@ import bpy
 
 from . import node_builder
 from . import tags_draw
+from . import gpu_overlay
 
 VIZ_COLLECTION = "Visualizers"
 VIZ_PANEL_CATEGORY = "Viz"
@@ -57,7 +58,13 @@ def _prepare_viz_mesh(me):
 
 
 def _ensure_viz_display_shading(context):
-    """Material Preview + emission viz mat (Workbench cannot color GN geo)."""
+    """Material Preview + emission viz mat (Workbench cannot color GN geo).
+
+    Skipped when GPU Markers are on — Solid is the acceptance path.
+    """
+    scene = getattr(context, "scene", None)
+    if scene is not None and getattr(scene, "attrviz_gpu_markers", False):
+        return
     screen = getattr(context, "screen", None)
     if screen is None:
         return
@@ -83,6 +90,9 @@ def _ensure_viz_display_shading(context):
 def _viz_display_shading_ok(space):
     if space is None or space.type != 'VIEW_3D':
         return True
+    scene = getattr(bpy.context, "scene", None)
+    if scene is not None and getattr(scene, "attrviz_gpu_markers", False):
+        return True  # Solid OK for GPU Markers
     return space.shading.type in ('MATERIAL', 'RENDERED')
 
 
@@ -655,13 +665,19 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
             layout.label(text="Viewport: Material Preview (emission viz)")
             return
         space = context.space_data
+        gpu_on = bool(getattr(context.scene, "attrviz_gpu_markers", False))
         # Solid Attribute cannot color GN-only geometry (Blender limit).
         if not _viz_display_shading_ok(space):
             _ensure_viz_display_shading(context)
-        row = layout.row()
-        row.label(text="Viewport: Material Preview", icon='SHADING_RENDERED')
-        row.operator("attrviz.use_viz_display_shading", text="",
-                     icon='FILE_REFRESH')
+        row = layout.row(align=True)
+        row.prop(context.scene, "attrviz_gpu_markers", text="GPU Markers",
+                 toggle=True)
+        if gpu_on:
+            row.label(text="Solid OK", icon='SHADING_SOLID')
+        else:
+            row.label(text="Material Preview", icon='SHADING_RENDERED')
+            row.operator("attrviz.use_viz_display_shading", text="",
+                         icon='FILE_REFRESH')
         for obj in vizzes:
             md = viz_modifier(obj)
             attr_name = ""
@@ -805,12 +821,26 @@ def _set_enabled(self, value):
     self.hide_viewport = not enabled
     md = viz_modifier(self)
     if md is not None:
-        md.show_viewport = enabled
+        use_gpu = bool(getattr(bpy.context.scene, "attrviz_gpu_markers", False))
+        display = None
+        try:
+            display = node_builder.menu_input_name(md, "Display")
+        except Exception:
+            pass
+        # GPU Markers draw the ink; keep GN carrier hidden to avoid double draw.
+        if enabled and use_gpu and display == "Markers":
+            md.show_viewport = False
+        else:
+            md.show_viewport = enabled
     if enabled:
         try:
             _ensure_viz_display_shading(bpy.context)
         except Exception:
             pass
+    try:
+        gpu_overlay.invalidate_all()
+    except Exception:
+        pass
 
 
 def _sync_vizcol_active(scene, depsgraph):
@@ -893,9 +923,11 @@ def register():
     )
     bpy.types.VIEW3D_MT_object_context_menu.append(_context_menu)
     tags_draw.register()
+    gpu_overlay.register()
 
 
 def unregister():
+    gpu_overlay.unregister()
     tags_draw.unregister()
     if _sync_vizcol_active in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(_sync_vizcol_active)

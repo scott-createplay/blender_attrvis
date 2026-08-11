@@ -33,21 +33,43 @@ def _cache_key(obj, attr, domain, n):
     )
 
 
-def _build_batch(positions: np.ndarray, colors: np.ndarray):
-    """One vertex-color point batch. Falls back to uniform if needed."""
+def _build_batch(positions: np.ndarray, colors: np.ndarray, prim='POINTS'):
+    """Vertex-color batch. prim: POINTS or LINES."""
     pos_list = [tuple(p) for p in positions]
-    # Blender 5 builtins: try SMOOTH_COLOR (pos+color), else UNIFORM_COLOR
     try:
         shader = gpu.shader.from_builtin('SMOOTH_COLOR')
         col_list = [tuple(c) for c in colors]
         batch = batch_for_shader(
-            shader, 'POINTS', {"pos": pos_list, "color": col_list},
+            shader, prim, {"pos": pos_list, "color": col_list},
         )
         return batch, shader, "smooth"
     except Exception:
         shader = gpu.shader.from_builtin('UNIFORM_COLOR')
-        batch = batch_for_shader(shader, 'POINTS', {"pos": pos_list})
+        batch = batch_for_shader(shader, 'POINTS' if prim == 'POINTS' else 'LINES',
+                                 {"pos": pos_list})
         return batch, shader, "uniform"
+
+
+def _vector_line_geometry(positions, values, length=0.15):
+    """Build interleaved line endpoints + per-endpoint colors from vectors."""
+    v = np.asarray(values, dtype=np.float32)
+    if v.ndim == 1 or v.shape[1] < 3:
+        return None, None
+    n = len(positions)
+    norms = np.linalg.norm(v[:, :3], axis=1, keepdims=True)
+    norms = np.maximum(norms, 1e-6)
+    dirs = v[:, :3] / norms
+    starts = positions
+    ends = positions + dirs * float(length)
+    line_pos = np.empty((n * 2, 3), dtype=np.float32)
+    line_pos[0::2] = starts
+    line_pos[1::2] = ends
+    # color by vector RGB
+    cols = color_map.rgb_colors(v) if hasattr(color_map, "rgb_colors") else color_map.values_to_colors(v, 'FLOAT_VECTOR')
+    line_cols = np.empty((n * 2, 4), dtype=np.float32)
+    line_cols[0::2] = cols
+    line_cols[1::2] = cols
+    return line_pos, line_cols
 
 
 def _refresh_cache(context):
@@ -77,7 +99,7 @@ def _refresh_cache(context):
         _batch_cache["batch"] = None
         return None
 
-    # Cap for interactive draw (Phase 3 documents; apply early)
+    # Cap for interactive draw (default 50k; stride subsample above)
     cap = max(1, int(prefs.point_cap))
     if n > cap:
         step = int(np.ceil(n / cap))
@@ -88,12 +110,34 @@ def _refresh_cache(context):
             values = values[::step, ...]
         n = len(positions)
 
-    key = _cache_key(obj, attr, domain, n)
+    draw_vectors = bool(prefs.draw_vectors) and dtype in (
+        'FLOAT_VECTOR', 'FLOAT2',
+    )
+    key = _cache_key(obj, attr, domain, n) + (draw_vectors, prefs.vector_length)
     if key == _batch_cache["key"] and _batch_cache["batch"] is not None:
         return _batch_cache
 
+    if draw_vectors:
+        line_pos, line_cols = _vector_line_geometry(
+            positions, values, length=prefs.vector_length,
+        )
+        if line_pos is None:
+            draw_vectors = False
+        else:
+            batch, shader, mode = _build_batch(line_pos, line_cols, prim='LINES')
+            _batch_cache.update({
+                "key": key,
+                "batch": batch,
+                "shader": shader,
+                "mode": mode,
+                "colors": line_cols,
+                "n": n,
+                "prim": "LINES",
+            })
+            return _batch_cache
+
     colors = color_map.values_to_colors(values, dtype)
-    batch, shader, mode = _build_batch(positions, colors)
+    batch, shader, mode = _build_batch(positions, colors, prim='POINTS')
     _batch_cache.update({
         "key": key,
         "batch": batch,
@@ -101,6 +145,7 @@ def _refresh_cache(context):
         "mode": mode,
         "colors": colors,
         "n": n,
+        "prim": "POINTS",
     })
     return _batch_cache
 
@@ -121,9 +166,11 @@ def draw_callback_view():
     shader = cache["shader"]
     mode = cache.get("mode", "uniform")
 
+    # Phase 3: depth-test against viewport depth (occluded samples hide).
+    # Go/no-go: Python LESS_EQUAL is enough for point/line ink on Solid;
+    # escalate only if Metal/scale shows systematic Z fighting vs mesh.
     gpu.state.depth_test_set('LESS_EQUAL')
     gpu.state.depth_mask_set(False)
-    # Point size — state API varies; try both
     try:
         gpu.state.point_size_set(float(prefs.point_size))
     except Exception:
@@ -134,7 +181,6 @@ def draw_callback_view():
 
     shader.bind()
     if mode == "uniform":
-        # average color fallback when SMOOTH_COLOR unavailable
         cols = cache.get("colors")
         if cols is not None and len(cols):
             mean = cols.mean(axis=0)
@@ -190,6 +236,19 @@ class ProbeGPUOverlayProps(bpy.types.PropertyGroup):
         min=100,
         max=2_000_000,
         description="Max points drawn (stride subsample above this)",
+        update=lambda self, ctx: _invalidate(),
+    )
+    draw_vectors: bpy.props.BoolProperty(
+        name="Vector Lines",
+        default=False,
+        description="If attribute is a vector, draw short line segments",
+        update=lambda self, ctx: _invalidate(),
+    )
+    vector_length: bpy.props.FloatProperty(
+        name="Vector Length",
+        default=0.15,
+        min=0.01,
+        max=5.0,
         update=lambda self, ctx: _invalidate(),
     )
 
@@ -251,9 +310,13 @@ class PROBE_PT_panel(bpy.types.Panel):
         layout.prop(prefs, "domain")
         layout.prop(prefs, "point_size")
         layout.prop(prefs, "point_cap")
+        layout.prop(prefs, "draw_vectors")
+        if prefs.draw_vectors:
+            layout.prop(prefs, "vector_length")
         if prefs.enabled:
             n = _batch_cache.get("n") or 0
-            layout.label(text=f"Drawing {n} points")
+            prim = _batch_cache.get("prim") or "POINTS"
+            layout.label(text=f"Drawing {n} ({prim})")
 
 
 _classes = (

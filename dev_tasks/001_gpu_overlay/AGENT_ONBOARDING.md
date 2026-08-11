@@ -1,6 +1,6 @@
 # Agent onboarding — GPU overlay (task 001)
 
-**Status: Stage A — Phase 2 pixels confirmed; F12 check pending**
+**Status: Stage B — GPU Markers code landed (user Solid verify pending)**
 
 **Source of truth:** [`POR.md`](POR.md)
 

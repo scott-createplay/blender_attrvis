@@ -87,10 +87,25 @@ Ask: “If this were an AOV panel for `heat`, would a human trust it?”
 - `face_id` + Face — hash colors at face centers (Phase 3 depth/faces)
 - `flow` + Point — RGB-ish from vector abs (stub)
 
-## Notes
+## Phase 3 extras
 
-- Draw handler: `POST_VIEW` (3D, depth-tested `LESS_EQUAL`).
-- Cap default 50k points (stride subsample above).
-- Cache rebuilds when target / attr / domain / matrix changes.
-- Depth correctness vs mesh surface is validated properly in Phase 3;
-  Phase 2 only needs visible unlit ink.
+| Control | Use |
+|---------|-----|
+| Domain **Face** + Attribute `face_id` | Hash colors at face centers (entity_id spirit) |
+| Attribute `flow` + **Vector Lines** | Short line segments (arrows-lite) |
+| Point Cap | Default **50000**; stride subsample above |
+
+**Depth:** draw uses `LESS_EQUAL`. Orbit the mesh — points behind the
+surface should hide. If occlusion is wrong on your GPU, note it for
+`ESCALATE.md` (do not invent fake scene meshes).
+
+## AttrViz Stage B (product path)
+
+Once AttrViz is installed/loaded from this repo:
+
+1. Viz panel → toggle **GPU Markers**
+2. Create a Markers visualizer (RMB → Visualize Attribute)
+3. Switch viewport to **Solid** — unlit points, no Material Preview required
+4. GN marker meshes are hidden while the flag is on (no double ink)
+
+GPU Markers default **off** so existing materials/GN behaviour stays stable.
