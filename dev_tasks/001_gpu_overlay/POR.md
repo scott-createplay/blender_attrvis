@@ -12,16 +12,16 @@ Build a **viewport GPU attribute overlay** for AttrViz: unlit data ink in **Soli
 
 If Python draw-handler depth/color cannot meet the bar, **escalate** mid-task to a compiled Overlay-engine path — with evidence — rather than papering over with scene meshes.
 
-## Status: Stage B started — GPU Markers behind scene flag
+## Status: Stage B — GPU Overlay + Tags Steps 1–2 (0.5.3)
 
 | Piece | State |
 |-------|--------|
-| AttrViz 0.5.2 materials path (emission + `vizcol`) | Working; keep as fallback until GPU Displays land |
-| Tags GPU prototype (`attrviz/tags_draw.py`) | Exists (`POST_PIXEL` text); reuse sampling ideas, not as the geometry ink path |
-| Standalone probe (`dev_tasks/001_gpu_overlay/probe/`) | **Gate A met**; Phase 3 depth/FACE/vectors in probe |
-| Real AttrViz GPU overlay module | **Markers + Surface + Arrows GPU**; Tags (text) deferred |
+| AttrViz materials path (emission + `vizcol`) | Working fallback; GPU Overlay covers Markers/Surface/Arrows |
+| Tags (BLF) | Shared sampler + cap; Size is int px (0.5.3) |
+| Standalone probe | Gate A met |
+| Real AttrViz GPU overlay | Markers + Surface + 4-sided Arrows; Tags Steps 1–2 |
 
-**Current AttrViz commit (context):** `61309c5` — AttrViz 0.5.2.
+**Current AttrViz version:** `0.5.3`.
 
 ---
 
