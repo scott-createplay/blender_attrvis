@@ -685,15 +685,13 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
             row.operator("attrviz.use_viz_display_shading", text="",
                          icon='FILE_REFRESH')
 
-        # Flat list under one root column. Do not call layout.box()/split()
-        # in a loop on ``layout`` — UILayout nests each child under the
-        # previous and shoves headers/controls off the right edge.
-        # Parent every header from ``root`` so they stay siblings; indent
-        # only that header's controls.
-        root = layout.column()
+        # One isolated column per visualizer, always created from the panel
+        # ``layout`` (not a shared root). Shared root + split() still nested
+        # the next header under the previous expanded body (intrinsics too).
         for i, obj in enumerate(vizzes):
             if i:
-                root.separator(factor=0.4)
+                layout.separator(factor=0.5)
+            block = layout.column()
             md = viz_modifier(obj)
             attr_name = ""
             domain = ""
@@ -707,7 +705,7 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
             if attr_name and domain:
                 title = f"{attr_name}  ·  {domain}"
 
-            head = root.row(align=True)
+            head = block.row(align=True)
             head.prop(obj, "attrviz_ui_expand", text="", emboss=False,
                       icon=('TRIA_DOWN' if obj.attrviz_ui_expand
                             else 'TRIA_RIGHT'))
@@ -723,10 +721,9 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
             if md is None or not obj.attrviz_ui_expand:
                 continue
 
-            indent = root.row()
-            split = indent.split(factor=0.03)
-            split.separator()
-            body = split.column()
+            # Controls stay inside this block only — never split()/box()
+            # onto a parent shared with later headers.
+            body = block.column()
             _draw_viz_body(body, obj, md, attr_name)
 
 
