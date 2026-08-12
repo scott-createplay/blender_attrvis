@@ -22,12 +22,12 @@ If Python draw-handler depth/color cannot meet the bar, **escalate** mid-task to
 | Real AttrViz GPU overlay | Markers + Surface + 4-sided Arrows; Tags Steps 1–2 |
 | **Viz N-panel layout** | **Fixed** — `layout.panel_prop` per viz (collapsible; header = Enabled + `attr · domain · type` + remove) |
 
-**Current AttrViz version:** `0.5.7`.
+**Current AttrViz version:** `0.5.8`.
 
 **Next (ordered):**
 
-1. **Phase 7b Arrows GPU instancing** — A0–A5 under Phase 7b (unit cone + `draw_instanced`; Length/Scale = instance rows only).  
-2. Scoping UX backlog — [`backlog.md`](backlog.md) (after Arrows).  
+1. **GUI visual gate** — Arrows instanced path on cube `flow` (0.5.8 synced); confirm cones + Length scrub.  
+2. Scoping UX backlog — [`backlog.md`](backlog.md).  
 3. Strangler Phase 2 / DistLook leftovers.  
 4. Surface P4 screenshot archive if not already saved.
 
@@ -444,20 +444,24 @@ Shader transforms unit cone (base at origin, tip +Z) into world via orthonormal 
 
 **Author**
 
-- [ ] Unit cone mesh + indexed `GPUBatch` (4-side OK to start).
-- [ ] Instance buffer from L0 sample + Length/Scale; custom shader (`GPUShaderCreateInfo` or GLSL string fallback).
-- [ ] Presentation cache: Length/Scale updates instance rows — **not** 12N vert rebuild.
-- [ ] Keep non-vector → empty honesty; density/cap unchanged at sample layer.
-- [ ] Leave Markers as POINTS; no GN for GPU Overlay Arrows.
-- [ ] Execute **A0–A5** above.
+- [x] Unit cone mesh + `GPUBatch` (4-side); shared module cache.
+- [x] Instance path: origin/dir as RGBA32F textures + `GPUShaderCreateInfo` + `draw_instanced`; Length/Scale/Color as push constants (per-viz uniforms — scrub does not rebuild cone verts when GPU context exists).
+- [x] Soup fallback when CreateInfo unavailable (`blender --background`); oracle `_arrow_cone_geometry` kept for tests.
+- [x] Non-vector → empty; density/cap unchanged at sample layer.
+- [x] Markers stay POINTS; no GN for GPU Overlay Arrows.
+- [x] Execute **A0–A4** (A5 visual still open).
 
 **Validate**
 
-- [ ] Visual parity with current 4-side cones on sample_scene_3 / test grid / cube `flow`.
-- [ ] Harness: `harness.scrub.Length` and Arrows present cost ≪ expanded-soup baseline; JSON under `references/perf/`.
-- [ ] Headless / gpu_sample cone contract still green (or updated for instance path: `n` arrows, not 12N verts).
+- [ ] Visual parity with current 4-side cones on cube `flow` / sample_scene_3 (**GUI** — CreateInfo needs GPU context).
+- [x] Harness JSON under `references/perf/arrows_{before,after}_instancing.json` (cube `flow`). Note: `--background` harness still exercises **soup fallback**; instanced hot path is GUI-only until Blender exposes CreateInfo without a window.
+- [x] Headless / `test_gpu_sample.py` green (alive frames ↔ soup count; instanced-or-soup).
 
-**Exit:** Arrows = instance transforms; soup path removed from hot path.
+**Exit:** Arrows = instance transforms in Solid GUI; soup remains background/oracle fallback.
+
+**Impl notes (0.5.8):**
+- Instance row = origin + dir textures; Length/radius/color are uniforms (same for all arrows in a viz).
+- `overlay.arrow_instances` span = alive filter; soup path still named `overlay.arrow_cones`.
 
 **Out of scope for 7b:** Target/Scope panel UX, attribute discovery, Surface mute changes, strangler Phase 2.
 

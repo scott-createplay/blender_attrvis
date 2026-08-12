@@ -107,12 +107,25 @@ if r_n:
     check("arrows on Normal produce cones",
           a2.get("n", 0) > 0 or a2.get("cone_verts", 0) > 0,
           str(a2))
-    # Geometry builder alone
+    check("arrows instanced or soup fallback",
+          a2.get("mode") == "instanced" or a2.get("cone_verts", 0) > 0,
+          f"mode={a2.get('mode')} keys={list(a2.keys())}")
+    if a2.get("mode") == "instanced":
+        check("instanced count matches alive",
+              a2.get("instance_count") == a2.get("n"),
+              str(a2.get("instance_count")))
+        print(f"  arrows path: INSTANCED n={a2.get('n')}")
+    else:
+        print(f"  arrows path: SOUP fallback (no GPU context) n={a2.get('n')}")
+    # Geometry builder alone (soup oracle)
     cone, n_a = gpu_overlay._arrow_cone_geometry(
         r_n[0], r_n[1], 0.08, 0.01, sides=4)
     check("cone verts = arrows * 4 sides * 3",
           cone is not None and len(cone) == n_a * 12,
           f"verts={None if cone is None else len(cone)} n={n_a}")
+    origins, dirs, n_f = gpu_overlay._arrow_alive_frames(r_n[0], r_n[1])
+    check("alive frames match soup arrow count",
+          n_f == n_a, f"frames={n_f} soup={n_a}")
 
 # Surface tris — identity topology (no inflate / filter / face stride)
 node_builder.set_input(md, "Display", "Surface")

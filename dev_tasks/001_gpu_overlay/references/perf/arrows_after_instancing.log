@@ -1,0 +1,94 @@
+00:00.252  blend            | Read blend: "/Users/scott.peters/dev/blender_attrvis/examples/attrviz_test_cube.blend"
+register_class(...):
+Info: Registering operator class: 'ATTRVIZ_OT_add', bl_idname 'attrviz.add' has been registered before, unregistering previous
+register_class(...):
+Info: Registering operator class: 'ATTRVIZ_OT_remove', bl_idname 'attrviz.remove' has been registered before, unregistering previous
+register_class(...):
+Info: Registering operator class: 'ATTRVIZ_OT_use_viz_display_shading', bl_idname 'attrviz.use_viz_display_shading' has been registered before, unregistering previous
+register_class(...):
+Info: Registering menu class: 'ATTRVIZ_MT_domain_point', bl_idname 'ATTRVIZ_MT_domain_point' has been registered before, unregistering previous
+register_class(...):
+Info: Registering menu class: 'ATTRVIZ_MT_domain_edge', bl_idname 'ATTRVIZ_MT_domain_edge' has been registered before, unregistering previous
+register_class(...):
+Info: Registering menu class: 'ATTRVIZ_MT_domain_face', bl_idname 'ATTRVIZ_MT_domain_face' has been registered before, unregistering previous
+register_class(...):
+Info: Registering menu class: 'ATTRVIZ_MT_domain_corner', bl_idname 'ATTRVIZ_MT_domain_corner' has been registered before, unregistering previous
+register_class(...):
+Info: Registering menu class: 'ATTRVIZ_MT_visualize', bl_idname 'ATTRVIZ_MT_visualize' has been registered before, unregistering previous
+register_class(...):
+Info: Registering panel class: 'ATTRVIZ_PT_panel', bl_idname 'ATTRVIZ_PT_panel' has been registered before, unregistering previous
+register_class(...):
+Info: Registering operator class: 'ATTRVIZ_OT_toggle_gpu_markers', bl_idname 'attrviz.toggle_gpu_markers' has been registered before, unregistering previous
+
+Harness targets (1): Attr Cube
+Displays: ['Arrows']
+
+  cold Arrows   @ Attr Cube: n=218
+=== AttrViz perf report ===
+  blend: examples/attrviz_test_cube.blend
+  attr: flow
+  domain: Point
+  displays: Arrows
+  max_targets: 1
+  notes:
+    targets: ['Attr Cube']
+    watch_mesh_count: 1
+    last_sample_n.Arrows: 20
+    cold_n.Attr Cube.Arrows: 218
+  span                                         n   total_ms    mean_ms     max_ms
+  ------------------------------------------------------------------------------
+  harness.add.Arrows                           1      50.01      50.01      50.01
+  overlay.refresh.Arrows                      12      20.92       1.74       3.73
+  overlay.present.Arrows                       9      18.93       2.10       2.83
+  harness.scrub.Length                         1      13.91      13.91      13.91
+  overlay.arrow_cones                          9      13.77       1.53       2.07
+  overlay.build_batch                          9       4.42       0.49       0.69
+  harness.cold.Arrows                          1       3.74       3.74       3.74
+  harness.scrub.Density                        1       3.28       3.28       3.28
+  harness.load_blend                           1       3.18       3.18       3.18
+  overlay.sample_miss.Arrows                   4       1.27       0.32       0.94
+  overlay.sample                               4       1.26       0.31       0.94
+  sample.visualizer_targets                    4       1.25       0.31       0.94
+  sample.evaluated                             4       1.00       0.25       0.91
+  sample.depsgraph_mesh                        4       0.85       0.21       0.84
+  overlay.arrow_instances                      9       0.21       0.02       0.05
+  sample.concat_density_cap                    4       0.19       0.05       0.06
+  overlay.cache_key                           12       0.13       0.01       0.02
+  harness.warm.Arrows                          2       0.11       0.06       0.06
+  sample.to_world                              4       0.07       0.02       0.04
+  sample.positions.Point                       4       0.04       0.01       0.02
+  sample.read_attr                             4       0.02       0.00       0.01
+  overlay.sample_hit                           5       0.00       0.00       0.00
+  overlay.cache_hit                            3       0.00       0.00       0.00
+Wrote JSON: /Users/scott.peters/dev/blender_attrvis/dev_tasks/001_gpu_overlay/references/perf/arrows_after_instancing.json
+
+Top spans by total_ms:
+      50.0 ms  n=1     harness.add.Arrows
+      20.9 ms  n=12    overlay.refresh.Arrows
+      18.9 ms  n=9     overlay.present.Arrows
+      13.9 ms  n=1     harness.scrub.Length
+      13.8 ms  n=9     overlay.arrow_cones
+       4.4 ms  n=9     overlay.build_batch
+       3.7 ms  n=1     harness.cold.Arrows
+       3.3 ms  n=1     harness.scrub.Density
+       3.2 ms  n=1     harness.load_blend
+       1.3 ms  n=4     overlay.sample_miss.Arrows
+       1.3 ms  n=4     overlay.sample
+       1.2 ms  n=4     sample.visualizer_targets
+       1.0 ms  n=4     sample.evaluated
+       0.9 ms  n=4     sample.depsgraph_mesh
+       0.2 ms  n=9     overlay.arrow_instances
+
+Harness done.
+Traceback (most recent call last):
+  File "/Applications/Blender.app/Contents/Resources/5.0/scripts/modules/addon_utils.py", line 566, in disable
+    mod.unregister()
+  File "/Users/scott.peters/Library/Application Support/Blender/5.0/extensions/user_default/attrviz/__init__.py", line 1062, in unregister
+    gpu_overlay.unregister()
+  File "/Users/scott.peters/Library/Application Support/Blender/5.0/extensions/user_default/attrviz/gpu_overlay.py", line 737, in unregister
+    bpy.utils.unregister_class(cls)
+RuntimeError: unregister_class(...):, missing bl_rna attribute from '_RNAMeta' instance (may not be registered)
+Exception in module unregister(): '/Users/scott.peters/Library/Application Support/Blender/5.0/extensions/user_default/attrviz/__init__.py'
+Blender 5.0.1 (hash a3db93c5b259 built 2025-12-16 01:51:40)
+
+Blender quit

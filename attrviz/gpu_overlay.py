@@ -285,11 +285,131 @@ def _build_batch(positions, colors, prim='POINTS'):
             return batch, shader, "uniform"
 
 
+# --- Arrows instancing (unit cone × N) ---------------------------------
+_arrow_shader = None
+_unit_cone_cache: dict = {}  # sides -> batch
+_instancing_ok = None  # None unknown; False in --background
+
+
+def _arrow_instancing_available() -> bool:
+    """CreateInfo / textures need a real GPU context (not --background)."""
+    global _instancing_ok
+    if _instancing_ok is not None:
+        return bool(_instancing_ok)
+    try:
+        _get_arrow_shader()
+        _instancing_ok = True
+    except Exception:
+        _instancing_ok = False
+    return bool(_instancing_ok)
+
+
+def _get_arrow_shader():
+    """Custom CreateInfo shader: unit cone × gl_InstanceID origin/dir tex."""
+    global _arrow_shader
+    if _arrow_shader is not None:
+        return _arrow_shader
+    info = gpu.types.GPUShaderCreateInfo()
+    info.vertex_in(0, 'VEC3', "pos")
+    info.sampler(0, 'FLOAT_2D', "origin_tex")
+    info.sampler(1, 'FLOAT_2D', "dir_tex")
+    info.push_constant('MAT4', "viewProjectionMatrix")
+    info.push_constant('FLOAT', "length")
+    info.push_constant('FLOAT', "radius")
+    info.push_constant('VEC4', "color")
+    info.fragment_out(0, 'VEC4', "fragColor")
+    info.vertex_source(
+        "void main()\n"
+        "{\n"
+        "  vec3 origin = texelFetch(origin_tex, ivec2(gl_InstanceID, 0), 0).xyz;\n"
+        "  vec3 dir = texelFetch(dir_tex, ivec2(gl_InstanceID, 0), 0).xyz;\n"
+        "  vec3 helper = (abs(dir.y) > 0.9) ? vec3(1.0, 0.0, 0.0)\n"
+        "                                   : vec3(0.0, 1.0, 0.0);\n"
+        "  vec3 side = normalize(cross(dir, helper));\n"
+        "  vec3 up = cross(side, dir);\n"
+        "  vec3 local = vec3(pos.x * radius, pos.y * radius, pos.z * length);\n"
+        "  vec3 world = origin + side * local.x + up * local.y + dir * local.z;\n"
+        "  gl_Position = viewProjectionMatrix * vec4(world, 1.0);\n"
+        "}\n"
+    )
+    info.fragment_source(
+        "void main()\n"
+        "{\n"
+        "  fragColor = color;\n"
+        "}\n"
+    )
+    _arrow_shader = gpu.shader.create_from_info(info)
+    return _arrow_shader
+
+
+def _unit_cone_tris(sides: int = 4):
+    """Unit cone: base ring radius 1 at z=0, tip at (0,0,1)."""
+    sides = max(3, int(sides))
+    angles = (2.0 * np.pi) * (np.arange(sides, dtype=np.float32) / sides)
+    ring = np.stack([np.cos(angles), np.sin(angles), np.zeros(sides)], axis=1)
+    tip = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    tris = np.empty((sides * 3, 3), dtype=np.float32)
+    k = 0
+    for j in range(sides):
+        j2 = (j + 1) % sides
+        tris[k] = tip
+        tris[k + 1] = ring[j]
+        tris[k + 2] = ring[j2]
+        k += 3
+    return tris
+
+
+def _get_unit_cone_batch(shader, sides: int = 4):
+    sides = max(3, int(sides))
+    cached = _unit_cone_cache.get(sides)
+    if cached is not None:
+        return cached
+    tris = _unit_cone_tris(sides)
+    pos_list = [tuple(p) for p in tris]
+    batch = batch_for_shader(shader, 'TRIS', {"pos": pos_list})
+    _unit_cone_cache[sides] = batch
+    return batch
+
+
+def _arrow_alive_frames(positions, values):
+    """Filter non-zero vectors → (origins Nx3, dirs Nx3, n) or (None, None, 0)."""
+    v = np.asarray(values, dtype=np.float32)
+    if v.ndim != 2 or v.shape[1] < 2:
+        return None, None, 0
+    if v.shape[1] == 2:
+        v3 = np.zeros((len(v), 3), dtype=np.float32)
+        v3[:, :2] = v
+        v = v3
+    else:
+        v = v[:, :3]
+    norms = np.linalg.norm(v, axis=1)
+    alive = norms > 1e-8
+    if not np.any(alive):
+        return None, None, 0
+    origins = np.asarray(positions, dtype=np.float32)[alive]
+    dirs = v[alive] / norms[alive][:, None]
+    return origins, dirs, int(len(origins))
+
+
+def _float_tex_rgba(rows: np.ndarray):
+    """Upload Nx3 float rows as N×1 RGBA32F texture (w unused)."""
+    import array
+    n = len(rows)
+    rgba = np.zeros((n, 4), dtype=np.float32)
+    rgba[:, :3] = rows
+    arr = array.array('f')
+    arr.frombytes(rgba.tobytes())
+    buf = gpu.types.Buffer('FLOAT', n * 4, arr)
+    return gpu.types.GPUTexture(size=(n, 1), format='RGBA32F', data=buf)
+
+
 def _arrow_cone_geometry(positions, values, length: float, radius: float,
                          sides: int = 4):
     """Batched N-sided cones: base at sample, tip along vector.
 
     Returns (tri_verts Mx3, n_arrows) with M = n_arrows * sides * 3.
+    Kept as oracle / soup fallback for tests and environments without
+    custom-shader instancing.
     """
     with perf.span("overlay.arrow_cones"):
         return _arrow_cone_geometry_impl(
@@ -413,19 +533,47 @@ def _refresh_arrows(obj, md, positions, values, dtype):
     except Exception:
         length, radius, color = 0.08, 0.007, (0.25, 0.65, 1.0, 1.0)
 
-    cone_pos, n_alive = _arrow_cone_geometry(
-        positions, values, length, radius, sides=4,
-    )
-    if cone_pos is None or n_alive == 0:
+    with perf.span("overlay.arrow_instances"):
+        origins, dirs, n_alive = _arrow_alive_frames(positions, values)
+    if origins is None or n_alive == 0:
         return {"batch": None, "n": 0, "prim": "TRIS", "empty": True}
 
+    # Prefer instanced unit-cone path (needs GPU context; soup in --background).
+    if _arrow_instancing_available():
+        try:
+            shader = _get_arrow_shader()
+            batch = _get_unit_cone_batch(shader, sides=4)
+            origin_tex = _float_tex_rgba(origins)
+            dir_tex = _float_tex_rgba(dirs)
+            return {
+                "batch": batch,
+                "shader": shader,
+                "mode": "instanced",
+                "instance_count": n_alive,
+                "origin_tex": origin_tex,
+                "dir_tex": dir_tex,
+                "length": length,
+                "radius": radius,
+                "n": n_alive,
+                "prim": "TRIS",
+                "uniform_color": color,
+            }
+        except Exception:
+            global _instancing_ok
+            _instancing_ok = False
+
+    cone_pos, n_soup = _arrow_cone_geometry(
+        positions, values, length, radius, sides=4,
+    )
+    if cone_pos is None or n_soup == 0:
+        return {"batch": None, "n": 0, "prim": "TRIS", "empty": True}
     colors = np.tile(np.array(color, dtype=np.float32), (len(cone_pos), 1))
     try:
         batch, shader, mode = _build_batch(cone_pos, colors, prim='TRIS')
     except Exception:
         return {
             "batch": None,
-            "n": n_alive,
+            "n": n_soup,
             "prim": "TRIS",
             "uniform_color": color,
             "cone_verts": len(cone_pos),
@@ -435,9 +583,10 @@ def _refresh_arrows(obj, md, positions, values, dtype):
         "shader": shader,
         "mode": mode,
         "colors": colors,
-        "n": n_alive,
+        "n": n_soup,
         "prim": "TRIS",
         "uniform_color": color,
+        "cone_verts": len(cone_pos),
     }
 
 
@@ -587,6 +736,61 @@ def draw_callback_view():
         _draw_callback_view_impl()
 
 
+def _draw_gpu_entry(entry):
+    """Bind + draw one cached overlay entry (points / tris / instanced)."""
+    if entry is None or entry.get("batch") is None:
+        return
+    with perf.span("overlay.gpu_draw"):
+        if entry.get("prim") == "POINTS":
+            try:
+                gpu.state.point_size_set(float(entry.get("point_size", 5.0)))
+            except Exception:
+                pass
+        shader = entry["shader"]
+        shader.bind()
+        mode = entry.get("mode")
+        if mode == "instanced":
+            try:
+                rv3d = bpy.context.region_data
+                mvp = rv3d.perspective_matrix if rv3d is not None else None
+                if mvp is not None:
+                    shader.uniform_float("viewProjectionMatrix", mvp)
+                else:
+                    shader.uniform_float(
+                        "viewProjectionMatrix",
+                        gpu.matrix.get_projection_matrix()
+                        @ gpu.matrix.get_model_view_matrix(),
+                    )
+            except Exception:
+                shader.uniform_float(
+                    "viewProjectionMatrix",
+                    gpu.matrix.get_projection_matrix()
+                    @ gpu.matrix.get_model_view_matrix(),
+                )
+            shader.uniform_float("length", float(entry.get("length", 0.08)))
+            shader.uniform_float("radius", float(entry.get("radius", 0.007)))
+            col = entry.get("uniform_color") or (0.25, 0.65, 1.0, 1.0)
+            shader.uniform_float("color", tuple(float(c) for c in col[:4]))
+            shader.uniform_sampler("origin_tex", entry["origin_tex"])
+            shader.uniform_sampler("dir_tex", entry["dir_tex"])
+            entry["batch"].draw_instanced(
+                shader, instance_count=int(entry.get("instance_count", 0)),
+            )
+            return
+        if mode == "uniform":
+            if entry.get("uniform_color"):
+                shader.uniform_float("color", entry["uniform_color"])
+            else:
+                cols = entry.get("colors")
+                if cols is not None and len(cols):
+                    mean = cols.mean(axis=0)
+                    shader.uniform_float(
+                        "color", tuple(float(c) for c in mean))
+                else:
+                    shader.uniform_float("color", (1.0, 0.5, 0.1, 1.0))
+        entry["batch"].draw(shader)
+
+
 def _draw_callback_view_impl():
     context = bpy.context
     if context.region is None or context.region_data is None:
@@ -608,18 +812,7 @@ def _draw_callback_view_impl():
 
     gpu.state.depth_mask_set(True)
     for obj, md, display in surfaces:
-        entry = _refresh_viz(obj, md, display)
-        if entry is None or entry.get("batch") is None:
-            continue
-        with perf.span("overlay.gpu_draw"):
-            shader = entry["shader"]
-            shader.bind()
-            if entry.get("mode") == "uniform":
-                cols = entry.get("colors")
-                if cols is not None and len(cols):
-                    mean = cols.mean(axis=0)
-                    shader.uniform_float("color", tuple(float(c) for c in mean))
-            entry["batch"].draw(shader)
+        _draw_gpu_entry(_refresh_viz(obj, md, display))
 
     try:
         gpu.state.face_culling_set('NONE')
@@ -627,29 +820,7 @@ def _draw_callback_view_impl():
         pass
     gpu.state.depth_mask_set(False)
     for obj, md, display in others:
-        entry = _refresh_viz(obj, md, display)
-        if entry is None or entry.get("batch") is None:
-            continue
-        with perf.span("overlay.gpu_draw"):
-            if entry.get("prim") == "POINTS":
-                try:
-                    gpu.state.point_size_set(float(entry.get("point_size", 5.0)))
-                except Exception:
-                    pass
-            shader = entry["shader"]
-            shader.bind()
-            if entry.get("mode") == "uniform":
-                if entry.get("uniform_color"):
-                    shader.uniform_float("color", entry["uniform_color"])
-                else:
-                    cols = entry.get("colors")
-                    if cols is not None and len(cols):
-                        mean = cols.mean(axis=0)
-                        shader.uniform_float(
-                            "color", tuple(float(c) for c in mean))
-                    else:
-                        shader.uniform_float("color", (1.0, 0.5, 0.1, 1.0))
-            entry["batch"].draw(shader)
+        _draw_gpu_entry(_refresh_viz(obj, md, display))
 
     gpu.state.depth_mask_set(True)
     gpu.state.depth_test_set('NONE')
