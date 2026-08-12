@@ -3,8 +3,9 @@
 POST_VIEW draw handler. Behind scene.attrviz_gpu_markers (default off)
 so GN+materials remain the default until validated.
 
-Markers → points. Surface → false-color mesh tris. Arrows → vector lines
-(non-vector → draw nothing). Tags stay on the BLF prototype.
+Markers → points. Surface → false-color mesh tris.
+Arrows → batched 4-sided cones (non-vector → draw nothing).
+Tags stay on the BLF prototype.
 """
 from __future__ import annotations
 
@@ -93,12 +94,15 @@ def _build_batch(positions, colors, prim='POINTS'):
         return batch, shader, "uniform"
 
 
-def _arrow_line_geometry(positions, values, length: float):
-    """Interleaved line endpoints from vector field. Drops near-zero."""
+def _arrow_cone_geometry(positions, values, length: float, radius: float,
+                         sides: int = 4):
+    """Batched N-sided cones: base at sample, tip along vector.
+
+    Returns (tri_verts Mx3, n_arrows) with M = n_arrows * sides * 3.
+    """
     v = np.asarray(values, dtype=np.float32)
     if v.ndim != 2 or v.shape[1] < 2:
-        return None, None
-    # pad FLOAT2 to 3
+        return None, 0
     if v.shape[1] == 2:
         v3 = np.zeros((len(v), 3), dtype=np.float32)
         v3[:, :2] = v
@@ -108,18 +112,53 @@ def _arrow_line_geometry(positions, values, length: float):
     norms = np.linalg.norm(v, axis=1)
     alive = norms > 1e-8
     if not np.any(alive):
-        return None, None
-    positions = positions[alive]
+        return None, 0
+    positions = np.asarray(positions, dtype=np.float32)[alive]
     v = v[alive]
     norms = norms[alive]
     dirs = v / norms[:, None]
     n = len(positions)
-    starts = positions
-    ends = positions + dirs * float(length)
-    line_pos = np.empty((n * 2, 3), dtype=np.float32)
-    line_pos[0::2] = starts
-    line_pos[1::2] = ends
-    return line_pos, n
+    sides = max(3, int(sides))
+    length = float(length)
+    radius = float(max(1e-6, radius))
+
+    # Orthonormal basis perpendicular to each direction
+    # Pick a helper axis not parallel to dir
+    helpers = np.tile(np.array([0.0, 1.0, 0.0], dtype=np.float32), (n, 1))
+    parallel = np.abs(dirs[:, 1]) > 0.9
+    helpers[parallel] = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    # side = normalize(cross(dir, helper)); up = cross(side, dir)
+    side = np.cross(dirs, helpers)
+    side_n = np.linalg.norm(side, axis=1, keepdims=True)
+    side_n = np.maximum(side_n, 1e-8)
+    side = side / side_n
+    up = np.cross(side, dirs)
+
+    tips = positions + dirs * length
+    # Base ring: positions + radius * (cos*side + sin*up)
+    angles = (2.0 * np.pi) * (np.arange(sides, dtype=np.float32) / sides)
+    cos_a = np.cos(angles)
+    sin_a = np.sin(angles)
+
+    # tris: sides * 3 verts each
+    m = n * sides * 3
+    tri_pos = np.empty((m, 3), dtype=np.float32)
+    k = 0
+    for i in range(n):
+        base = positions[i]
+        tip = tips[i]
+        s = side[i]
+        u = up[i]
+        ring = np.empty((sides, 3), dtype=np.float32)
+        for j in range(sides):
+            ring[j] = base + radius * (cos_a[j] * s + sin_a[j] * u)
+        for j in range(sides):
+            j2 = (j + 1) % sides
+            tri_pos[k] = tip
+            tri_pos[k + 1] = ring[j]
+            tri_pos[k + 2] = ring[j2]
+            k += 3
+    return tri_pos, n
 
 
 def _viz_cache_key(obj, md, display, n, extra=()):
@@ -133,6 +172,7 @@ def _viz_cache_key(obj, md, display, n, extra=()):
         rmin = float(node_builder.get_input(md, "Range Min") or 0.0)
         rmax = float(node_builder.get_input(md, "Range Max") or 1.0)
         length = float(node_builder.get_input(md, "Length") or 0.08)
+        scale = float(node_builder.get_input(md, "Scale") or 0.02)
         acol = node_builder.get_input(md, "Arrow Color")
         if acol is not None:
             acol = tuple(float(c) for c in acol[:4])
@@ -141,7 +181,7 @@ def _viz_cache_key(obj, md, display, n, extra=()):
     except Exception:
         attr, domain, style = "", "Point", "Heat"
         density, seed, auto, rmin, rmax = 1.0, 0, True, 0.0, 1.0
-        length, acol = 0.08, (0.2, 0.6, 1.0, 1.0)
+        length, scale, acol = 0.08, 0.02, (0.2, 0.6, 1.0, 1.0)
     target = None
     try:
         target = node_builder.get_input(md, "Target")
@@ -153,7 +193,7 @@ def _viz_cache_key(obj, md, display, n, extra=()):
         tw = tuple(mw[i][j] for i in range(4) for j in range(4))
     return (
         obj.as_pointer(), display, attr, domain, style, density, seed,
-        auto, rmin, rmax, length, acol, n, tw, extra,
+        auto, rmin, rmax, length, scale, acol, n, tw, extra,
     )
 
 
@@ -192,9 +232,12 @@ def _refresh_markers(obj, md, positions, values, dtype, density, seed,
 def _refresh_arrows(obj, md, positions, values, dtype):
     # Honesty: non-vector → nothing
     if dtype not in VECTORISH:
-        return {"batch": None, "n": 0, "prim": "LINES", "empty": True}
+        return {"batch": None, "n": 0, "prim": "TRIS", "empty": True}
     try:
         length = float(node_builder.get_input(md, "Length") or 0.08)
+        scale = float(node_builder.get_input(md, "Scale") or 0.02)
+        # Match GN spirit: Scale drives thickness; cone radius ~ scale * 0.35
+        radius = max(1e-5, scale * 0.35)
         acol = node_builder.get_input(md, "Arrow Color")
         if acol is not None and len(acol) >= 3:
             color = (
@@ -204,23 +247,24 @@ def _refresh_arrows(obj, md, positions, values, dtype):
         else:
             color = (0.25, 0.65, 1.0, 1.0)
     except Exception:
-        length, color = 0.08, (0.25, 0.65, 1.0, 1.0)
+        length, radius, color = 0.08, 0.007, (0.25, 0.65, 1.0, 1.0)
 
-    line_pos, n_alive = _arrow_line_geometry(positions, values, length)
-    if line_pos is None:
-        return {"batch": None, "n": 0, "prim": "LINES", "empty": True}
+    cone_pos, n_alive = _arrow_cone_geometry(
+        positions, values, length, radius, sides=4,
+    )
+    if cone_pos is None or n_alive == 0:
+        return {"batch": None, "n": 0, "prim": "TRIS", "empty": True}
 
-    colors = np.tile(np.array(color, dtype=np.float32), (len(line_pos), 1))
+    colors = np.tile(np.array(color, dtype=np.float32), (len(cone_pos), 1))
     try:
-        batch, shader, mode = _build_batch(line_pos, colors, prim='LINES')
+        batch, shader, mode = _build_batch(cone_pos, colors, prim='TRIS')
     except Exception:
-        # Headless / no GPU context — geometry still valid
         return {
             "batch": None,
             "n": n_alive,
-            "prim": "LINES",
+            "prim": "TRIS",
             "uniform_color": color,
-            "line_verts": len(line_pos),
+            "cone_verts": len(cone_pos),
         }
     return {
         "batch": batch,
@@ -228,7 +272,7 @@ def _refresh_arrows(obj, md, positions, values, dtype):
         "mode": mode,
         "colors": colors,
         "n": n_alive,
-        "prim": "LINES",
+        "prim": "TRIS",
         "uniform_color": color,
     }
 

@@ -99,14 +99,20 @@ arrow_entry = gpu_overlay._refresh_arrows(
 check("arrows on float → empty",
       arrow_entry.get("empty") is True or arrow_entry.get("batch") is None)
 
-# Normal as vector arrows
+# Normal as vector arrows (4-sided cones)
 r_n = gpu_sample.sample_evaluated(grid, "Normal", "Point", world_space=True)
 check("sample Normal", r_n is not None and r_n[2] == 'FLOAT_VECTOR')
 if r_n:
     a2 = gpu_overlay._refresh_arrows(viz, md, r_n[0], r_n[1], r_n[2])
-    check("arrows on Normal produce line count",
-          a2.get("n", 0) > 0 or a2.get("empty") is not True,
-          str(a2.get("n")))
+    check("arrows on Normal produce cones",
+          a2.get("n", 0) > 0 or a2.get("cone_verts", 0) > 0,
+          str(a2))
+    # Geometry builder alone
+    cone, n_a = gpu_overlay._arrow_cone_geometry(
+        r_n[0], r_n[1], 0.08, 0.01, sides=4)
+    check("cone verts = arrows * 4 sides * 3",
+          cone is not None and len(cone) == n_a * 12,
+          f"verts={None if cone is None else len(cone)} n={n_a}")
 
 # Surface tris
 node_builder.set_input(md, "Display", "Surface")
