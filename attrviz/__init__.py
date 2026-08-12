@@ -679,11 +679,15 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
             row.operator("attrviz.use_viz_display_shading", text="",
                          icon='FILE_REFRESH')
 
-        # Sibling boxes under one column — successive layout.box() nests
-        # each header under the previous (header → next header). Controls
-        # stay indented under their own header only.
-        list_col = layout.column()
-        for obj in vizzes:
+        # Flat list under one root column. Do not call layout.box()/split()
+        # in a loop on ``layout`` — UILayout nests each child under the
+        # previous and shoves headers/controls off the right edge.
+        # Parent every header from ``root`` so they stay siblings; indent
+        # only that header's controls.
+        root = layout.column()
+        for i, obj in enumerate(vizzes):
+            if i:
+                root.separator(factor=0.4)
             md = viz_modifier(obj)
             attr_name = ""
             domain = ""
@@ -697,8 +701,7 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
             if attr_name and domain:
                 title = f"{attr_name}  ·  {domain}"
 
-            box = list_col.box()
-            head = box.row(align=True)
+            head = root.row(align=True)
             head.prop(obj, "attrviz_ui_expand", text="", emboss=False,
                       icon=('TRIA_DOWN' if obj.attrviz_ui_expand
                             else 'TRIA_RIGHT'))
@@ -714,12 +717,15 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
             if md is None or not obj.attrviz_ui_expand:
                 continue
 
-            _draw_viz_body(box, obj, md, attr_name)
+            indent = root.row()
+            split = indent.split(factor=0.03)
+            split.separator()
+            body = split.column()
+            _draw_viz_body(body, obj, md, attr_name)
 
 
-def _draw_viz_body(box, obj, md, attr_name):
-    """Controls for one visualizer — only ever parented under ``box``."""
-    body = box.column()
+def _draw_viz_body(body, obj, md, attr_name):
+    """Controls for one visualizer — parented under ``body`` only."""
     body.active = bool(obj.attrviz_enabled)
 
     # Domain localizes; Type / Color follow.
