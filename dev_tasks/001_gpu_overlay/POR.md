@@ -295,7 +295,7 @@ Not a hard gate for Stage B Markers.
 **Author**
 
 - [x] Arrows: line/cone-lite from vector attrs; non-vector → draw nothing (honesty rule from 0.5.x).
-- [ ] Tags: keep BLF labels but prefer depth-aware placement / `POST_VIEW` where possible; share sampler with Markers. **Deferred** — BLF `POST_PIXEL` prototype remains; depth-aware Tags is follow-on.
+- [x] Tags: keep BLF labels but prefer depth-aware placement / `POST_VIEW` where possible; share sampler with Markers. **Steps 1–2 done:** shared `gpu_sample` (incl. STRING), facing + nearest-N cap, screen cull, label cache, batched cards. Still `POST_PIXEL`+BLF (semantic text). Atlas = Step 3.
 - [x] Style sockets (Heat / RGB / Random) applied in GPU color map (parity with GN intent, not pixel-identical ramp required in v1).
 
 **Validate**

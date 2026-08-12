@@ -49,6 +49,9 @@ def _read_attr(me, name: str, domain: str, n: int):
         a = np.empty(n * 4, dtype=np.float32)
         attr.data.foreach_get("color", a)
         return a.reshape(-1, 4), dt
+    if dt == 'STRING':
+        # No foreach_get for strings — materialize Python strings.
+        return np.array([str(d.value) for d in attr.data], dtype=object), dt
     return None, dt
 
 

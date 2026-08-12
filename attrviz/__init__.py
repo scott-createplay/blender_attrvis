@@ -799,8 +799,9 @@ def _draw_viz_body(body, obj, md, attr_name):
         _draw_socket(col, md, "Scale", text="Thickness")
         _draw_socket(col, md, "Density")
     elif display == "Tags":
-        body.label(text="GPU sprite prototype (compiled path later)",
-                   icon='INFO')
+        body.label(
+            text="BLF tags: shared sampler, capped count; atlas later",
+            icon='INFO')
         col = body.column(align=True)
         _draw_socket(col, md, "Tag Color", text="Color")
         _draw_socket(col, md, "Tag Size", text="Size")
