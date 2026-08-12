@@ -14,7 +14,7 @@ Axes (Index Switch ints — Menu sockets break on 5.0 modifier ID-props):
 """
 import bpy
 
-VERSION = "0.5.2"
+VERSION = "0.5.3"
 ENGINE_NAME = "AttrViz Engine"
 # Baked on mesh before Mesh to Points — Input Normal is (0,0,0) on points.
 AV_NORMAL_ATTR = ".attrviz_normal"
@@ -491,9 +491,9 @@ def ensure_viz_group(force=False):
     _sock(t, "Tag Cap", "INPUT", "NodeSocketInt", default_value=10000,
           min_value=1, max_value=10000,
           description="Tags: max labels drawn (scale budget)")
-    _sock(t, "Tag Size", "INPUT", "NodeSocketFloat", default_value=14.0,
-          min_value=6.0, max_value=64.0,
-          description="Tags: screen-space size in pixels")
+    _sock(t, "Tag Size", "INPUT", "NodeSocketInt", default_value=14,
+          min_value=6, max_value=64,
+          description="Tags: font size in pixels (integer steps)")
     _sock(t, "Tag Color", "INPUT", "NodeSocketColor",
           default_value=(0.95, 0.95, 0.95, 1.0),
           description="Tags: label / sprite tint")

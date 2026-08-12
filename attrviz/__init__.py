@@ -213,6 +213,12 @@ def _migrate_visualizer(obj):
     for key, value in saved.items():
         if value is None and key in ("Target", "Scope"):
             continue
+        # Tag Size became int in 0.5.3 (BLF pixel steps).
+        if key == "Tag Size":
+            try:
+                value = int(round(float(value)))
+            except Exception:
+                value = 14
         try:
             node_builder.set_input(md, key, value)
         except Exception:
@@ -804,7 +810,7 @@ def _draw_viz_body(body, obj, md, attr_name):
             icon='INFO')
         col = body.column(align=True)
         _draw_socket(col, md, "Tag Color", text="Color")
-        _draw_socket(col, md, "Tag Size", text="Size")
+        _draw_socket(col, md, "Tag Size", text="Size (px)")
         _draw_socket(col, md, "Tag Cap", text="Cap")
         _draw_socket(col, md, "Decimals")
         _draw_socket(col, md, "Facing Cull")

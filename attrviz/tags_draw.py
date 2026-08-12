@@ -267,7 +267,7 @@ def draw_callback_px():
 
     for obj, md in _tag_visualizers():
         try:
-            size = float(node_builder.get_input(md, "Tag Size") or 14.0)
+            size = int(node_builder.get_input(md, "Tag Size") or 14)
             color = node_builder.get_input(md, "Tag Color")
         except Exception:
             continue
@@ -276,7 +276,7 @@ def draw_callback_px():
         if not screen:
             continue
 
-        blf.size(font_id, max(6, int(size)))
+        blf.size(font_id, max(6, size))
         blf.color(font_id, float(color[0]), float(color[1]),
                   float(color[2]), 1.0)
 
