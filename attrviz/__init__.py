@@ -289,6 +289,11 @@ def add_visualizer(context, target=None, scope=None,
     node_builder.set_input(md, "Display", display)
     _sync_attr_is_vector(md)
     _ensure_viz_display_shading(context)
+    # Open settings for the new viz (accordion collapses others).
+    try:
+        obj.attrviz_ui_expand = True
+    except Exception:
+        pass
     return obj
 
 
@@ -685,13 +690,20 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
             row.operator("attrviz.use_viz_display_shading", text="",
                          icon='FILE_REFRESH')
 
-        # One isolated column per visualizer, always created from the panel
-        # ``layout`` (not a shared root). Shared root + split() still nested
-        # the next header under the previous expanded body (intrinsics too).
-        for i, obj in enumerate(vizzes):
-            if i:
-                layout.separator(factor=0.5)
-            block = layout.column()
+        # Flat header rows only (layout.row). Any column()/box()/split()
+        # inside the loop nests the *next* header under the previous body
+        # in Blender's UILayout — including intrinsics. Bodies draw after
+        # all headers; accordion keeps a single expanded body.
+        # Heal older sessions where every viz was expanded by default.
+        opened = [o for o in vizzes if o.attrviz_ui_expand]
+        if len(opened) > 1:
+            for o in opened[:-1]:
+                o.attrviz_ui_expand = False
+
+        expanded_obj = None
+        expanded_md = None
+        expanded_attr = ""
+        for obj in vizzes:
             md = viz_modifier(obj)
             attr_name = ""
             domain = ""
@@ -705,26 +717,28 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
             if attr_name and domain:
                 title = f"{attr_name}  ·  {domain}"
 
-            head = block.row(align=True)
-            head.prop(obj, "attrviz_ui_expand", text="", emboss=False,
-                      icon=('TRIA_DOWN' if obj.attrviz_ui_expand
-                            else 'TRIA_RIGHT'))
-            head.label(text=title)
+            row = layout.row(align=True)
+            row.prop(obj, "attrviz_ui_expand", text="", emboss=False,
+                     icon=('TRIA_DOWN' if obj.attrviz_ui_expand
+                           else 'TRIA_RIGHT'))
+            row.label(text=title)
             try:
-                head.separator_spacer()
+                row.separator_spacer()
             except Exception:
-                head.separator()
-            head.prop(obj, "attrviz_enabled", text="Enabled", toggle=True)
-            op = head.operator(ATTRVIZ_OT_remove.bl_idname, text="",
-                               icon='X')
+                row.separator()
+            row.prop(obj, "attrviz_enabled", text="Enabled", toggle=True)
+            op = row.operator(ATTRVIZ_OT_remove.bl_idname, text="",
+                              icon='X')
             op.name = obj.name
-            if md is None or not obj.attrviz_ui_expand:
-                continue
+            if obj.attrviz_ui_expand and md is not None:
+                expanded_obj = obj
+                expanded_md = md
+                expanded_attr = attr_name
 
-            # Controls stay inside this block only — never split()/box()
-            # onto a parent shared with later headers.
-            body = block.column()
-            _draw_viz_body(body, obj, md, attr_name)
+        if expanded_obj is not None:
+            layout.separator()
+            body = layout.column()
+            _draw_viz_body(body, expanded_obj, expanded_md, expanded_attr)
 
 
 def _draw_viz_body(body, obj, md, attr_name):
@@ -831,6 +845,19 @@ CLASSES = (
 )
 
 
+def _update_ui_expand(self, context):
+    """Accordion: only one visualizer settings block open at a time."""
+    if not self.attrviz_ui_expand:
+        return
+    scene = context.scene if context is not None else bpy.context.scene
+    if scene is None:
+        return
+    for obj in visualizers(scene):
+        if obj != self and obj.attrviz_ui_expand:
+            # Assigning False re-enters update; early-return above avoids loops.
+            obj.attrviz_ui_expand = False
+
+
 def _get_enabled(self):
     return not self.hide_viewport
 
@@ -905,8 +932,9 @@ def register():
         bpy.app.handlers.depsgraph_update_post.append(_sync_vizcol_active)
     bpy.types.Object.attrviz_ui_expand = bpy.props.BoolProperty(
         name="Expand",
-        description="Show visualizer settings (Enabled stays visible when collapsed)",
-        default=True,
+        description="Show this visualizer's settings (one open at a time)",
+        default=False,
+        update=_update_ui_expand,
     )
     bpy.types.Object.attrviz_enabled = bpy.props.BoolProperty(
         name="Enabled",
