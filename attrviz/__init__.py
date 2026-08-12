@@ -678,6 +678,11 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
             row.label(text="Material Preview", icon='SHADING_RENDERED')
             row.operator("attrviz.use_viz_display_shading", text="",
                          icon='FILE_REFRESH')
+
+        # Sibling boxes under one column — successive layout.box() nests
+        # each header under the previous (header → next header). Controls
+        # stay indented under their own header only.
+        list_col = layout.column()
         for obj in vizzes:
             md = viz_modifier(obj)
             attr_name = ""
@@ -692,7 +697,7 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
             if attr_name and domain:
                 title = f"{attr_name}  ·  {domain}"
 
-            box = layout.box()
+            box = list_col.box()
             head = box.row(align=True)
             head.prop(obj, "attrviz_ui_expand", text="", emboss=False,
                       icon=('TRIA_DOWN' if obj.attrviz_ui_expand
@@ -709,94 +714,98 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
             if md is None or not obj.attrviz_ui_expand:
                 continue
 
-            body = box.column()
-            body.active = bool(obj.attrviz_enabled)
+            _draw_viz_body(box, obj, md, attr_name)
 
-            # Domain localizes; Type / Color follow.
-            body.prop(obj, "attrviz_domain", text="Domain", expand=True)
-            _draw_socket(body, md, "Attribute")
-            _sync_attr_is_vector(md)
-            dtype, _ = _target_attr_meta(md)
-            try:
-                target = node_builder.get_input(md, "Target")
-            except Exception:
-                target = None
-            domain = node_builder.menu_input_name(md, "Domain")
-            if attr_name and target is not None \
-                    and not _attr_available_on_domain(
-                        target, attr_name, domain):
-                body.label(
-                    text=f"“{attr_name}” is not on {domain} domain",
-                    icon='ERROR')
-            elif node_builder.is_intrinsic(attr_name):
-                body.label(
-                    text=f"{attr_name} = GN field (always current topology)")
-            elif dtype:
-                guess_s, guess_d = auto_pick(
-                    domain, dtype, has_faces=True, attribute=attr_name)
-                body.label(
-                    text=(f"{_dtype_label(dtype)}  ·  default "
-                          f"{guess_s} / {guess_d}"))
-                if dtype in CATEGORICAL:
-                    body.label(
-                        text="IDs before Subdiv interpolate — use Index",
-                        icon='INFO')
-            body.prop(obj, "attrviz_display", text="Type", expand=True)
 
-            display = node_builder.menu_input_name(md, "Display")
-            style = node_builder.menu_input_name(md, "Style")
-            colored = display in ("Markers", "Surface")
+def _draw_viz_body(box, obj, md, attr_name):
+    """Controls for one visualizer — only ever parented under ``box``."""
+    body = box.column()
+    body.active = bool(obj.attrviz_enabled)
 
-            if display == "Arrows" and dtype not in VECTORISH:
-                body.label(
-                    text="Non-vector → direction (0,0,0); no arrows",
-                    icon='ERROR')
-            if display == "Surface" and domain == "Edge":
-                body.label(text="Surface on Edge is weakly supported",
-                           icon='INFO')
+    # Domain localizes; Type / Color follow.
+    body.prop(obj, "attrviz_domain", text="Domain", expand=True)
+    _draw_socket(body, md, "Attribute")
+    _sync_attr_is_vector(md)
+    dtype, _ = _target_attr_meta(md)
+    try:
+        target = node_builder.get_input(md, "Target")
+    except Exception:
+        target = None
+    domain = node_builder.menu_input_name(md, "Domain")
+    if attr_name and target is not None \
+            and not _attr_available_on_domain(target, attr_name, domain):
+        body.label(
+            text=f"“{attr_name}” is not on {domain} domain",
+            icon='ERROR')
+    elif node_builder.is_intrinsic(attr_name):
+        body.label(
+            text=f"{attr_name} = GN field (always current topology)")
+    elif dtype:
+        guess_s, guess_d = auto_pick(
+            domain, dtype, has_faces=True, attribute=attr_name)
+        body.label(
+            text=(f"{_dtype_label(dtype)}  ·  default "
+                  f"{guess_s} / {guess_d}"))
+        if dtype in CATEGORICAL:
+            body.label(
+                text="IDs before Subdiv interpolate — use Index",
+                icon='INFO')
+    body.prop(obj, "attrviz_display", text="Type", expand=True)
 
-            if colored:
-                body.prop(obj, "attrviz_style", text="Color", expand=True)
-                if style == "RGB" and dtype not in VECTORISH:
-                    body.label(text="RGB expects a vector attribute",
-                               icon='INFO')
-                if style == "Random":
-                    body.label(text="Stable hash color per element id")
-                    _draw_socket(body, md, "Seed")
-                if style == "Heat":
-                    ramp = next(
-                        (n for n in md.node_group.nodes
-                         if n.bl_idname == 'ShaderNodeValToRGB'), None)
-                    if ramp is not None:
-                        body.template_color_ramp(ramp, "color_ramp",
-                                                 expand=False)
-                    col = body.column(align=True)
-                    _draw_socket(col, md, "Auto Range")
-                    sub = col.column(align=True)
-                    sub.active = not bool(
-                        node_builder.get_input(md, "Auto Range"))
-                    _draw_socket(sub, md, "Range Min")
-                    _draw_socket(sub, md, "Range Max")
-            elif display == "Arrows":
-                col = body.column(align=True)
-                _draw_socket(col, md, "Arrow Color", text="Color")
-                _draw_socket(col, md, "Length")
-                _draw_socket(col, md, "Scale", text="Thickness")
-                _draw_socket(col, md, "Density")
-            elif display == "Tags":
-                body.label(text="GPU sprite prototype (compiled path later)",
-                           icon='INFO')
-                col = body.column(align=True)
-                _draw_socket(col, md, "Tag Color", text="Color")
-                _draw_socket(col, md, "Tag Size", text="Size")
-                _draw_socket(col, md, "Tag Cap", text="Cap")
-                _draw_socket(col, md, "Decimals")
-                _draw_socket(col, md, "Facing Cull")
+    display = node_builder.menu_input_name(md, "Display")
+    style = node_builder.menu_input_name(md, "Style")
+    colored = display in ("Markers", "Surface")
 
-            if display == "Markers":
-                col = body.column(align=True)
-                _draw_socket(col, md, "Scale")
-                _draw_socket(col, md, "Density")
+    if display == "Arrows" and dtype not in VECTORISH:
+        body.label(
+            text="Non-vector → direction (0,0,0); no arrows",
+            icon='ERROR')
+    if display == "Surface" and domain == "Edge":
+        body.label(text="Surface on Edge is weakly supported",
+                   icon='INFO')
+
+    if colored:
+        body.prop(obj, "attrviz_style", text="Color", expand=True)
+        if style == "RGB" and dtype not in VECTORISH:
+            body.label(text="RGB expects a vector attribute",
+                       icon='INFO')
+        if style == "Random":
+            body.label(text="Stable hash color per element id")
+            _draw_socket(body, md, "Seed")
+        if style == "Heat":
+            ramp = next(
+                (n for n in md.node_group.nodes
+                 if n.bl_idname == 'ShaderNodeValToRGB'), None)
+            if ramp is not None:
+                body.template_color_ramp(ramp, "color_ramp",
+                                         expand=False)
+            col = body.column(align=True)
+            _draw_socket(col, md, "Auto Range")
+            sub = col.column(align=True)
+            sub.active = not bool(
+                node_builder.get_input(md, "Auto Range"))
+            _draw_socket(sub, md, "Range Min")
+            _draw_socket(sub, md, "Range Max")
+    elif display == "Arrows":
+        col = body.column(align=True)
+        _draw_socket(col, md, "Arrow Color", text="Color")
+        _draw_socket(col, md, "Length")
+        _draw_socket(col, md, "Scale", text="Thickness")
+        _draw_socket(col, md, "Density")
+    elif display == "Tags":
+        body.label(text="GPU sprite prototype (compiled path later)",
+                   icon='INFO')
+        col = body.column(align=True)
+        _draw_socket(col, md, "Tag Color", text="Color")
+        _draw_socket(col, md, "Tag Size", text="Size")
+        _draw_socket(col, md, "Tag Cap", text="Cap")
+        _draw_socket(col, md, "Decimals")
+        _draw_socket(col, md, "Facing Cull")
+
+    if display == "Markers":
+        col = body.column(align=True)
+        _draw_socket(col, md, "Scale")
+        _draw_socket(col, md, "Density")
 
 
 CLASSES = (
