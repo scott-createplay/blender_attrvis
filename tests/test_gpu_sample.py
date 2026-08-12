@@ -138,11 +138,13 @@ node_builder.set_input(md, "Domain", "Point")
 
 # Flag exists after register (already registered via import side? need register)
 av.register()
-check("gpu markers flag default off",
-      getattr(bpy.context.scene, "attrviz_gpu_markers", None) is False
-      or bpy.context.scene.attrviz_gpu_markers is False)
+check("gpu overlay flag default on",
+      bool(bpy.context.scene.attrviz_gpu_markers) is True)
 
 # Existing geometry path still emits markers when GPU off
+bpy.context.scene.attrviz_gpu_markers = False
+node_builder.set_input(md, "Display", "Markers")
+md.show_viewport = True
 gs = None
 viz.update_tag()
 bpy.context.view_layer.update()

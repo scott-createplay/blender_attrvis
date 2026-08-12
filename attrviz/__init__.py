@@ -63,7 +63,7 @@ def _ensure_viz_display_shading(context):
     Skipped when GPU Markers are on — Solid is the acceptance path.
     """
     scene = getattr(context, "scene", None)
-    if scene is not None and getattr(scene, "attrviz_gpu_markers", False):
+    if scene is not None and getattr(scene, "attrviz_gpu_markers", True):
         return
     screen = getattr(context, "screen", None)
     if screen is None:
@@ -91,7 +91,7 @@ def _viz_display_shading_ok(space):
     if space is None or space.type != 'VIEW_3D':
         return True
     scene = getattr(bpy.context, "scene", None)
-    if scene is not None and getattr(scene, "attrviz_gpu_markers", False):
+    if scene is not None and getattr(scene, "attrviz_gpu_markers", True):
         return True  # Solid OK for GPU Markers
     return space.shading.type in ('MATERIAL', 'RENDERED')
 
@@ -671,7 +671,7 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
             layout.label(text="Viewport: Material Preview (emission viz)")
             return
         space = context.space_data
-        gpu_on = bool(getattr(context.scene, "attrviz_gpu_markers", False))
+        gpu_on = bool(getattr(context.scene, "attrviz_gpu_markers", True))
         # Solid Attribute cannot color GN-only geometry (Blender limit).
         if not _viz_display_shading_ok(space):
             _ensure_viz_display_shading(context)
@@ -843,7 +843,7 @@ def _set_enabled(self, value):
     self.hide_viewport = not enabled
     md = viz_modifier(self)
     if md is not None:
-        use_gpu = bool(getattr(bpy.context.scene, "attrviz_gpu_markers", False))
+        use_gpu = bool(getattr(bpy.context.scene, "attrviz_gpu_markers", True))
         display = None
         try:
             display = node_builder.menu_input_name(md, "Display")

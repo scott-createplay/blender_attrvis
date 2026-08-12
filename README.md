@@ -17,25 +17,37 @@ viewport" workflow. AttrViz adds it:
 
 - **Visualizers are ordinary scene objects** in a visible
   `Visualizers` collection. The outliner is the registry; the
-  viewport **eye icon** toggles each one; delete the object, the
-  visualizer is gone. They save with your .blend.
+  viewport **eye icon** / **Enabled** toggles each one; delete the
+  object, the visualizer is gone. They save with your .blend.
 - **RMB → Visualize Attribute** lists every attribute on the object's
   *evaluated* geometry (so attributes created by Geometry Nodes
   modifiers show up too) and creates a visualizer with sensible
   defaults in one click.
 - **A "Viz" tab in the 3D viewport sidebar** lists all visualizers:
-  toggle, remove, edit the color ramp, and tune attribute / style /
-  display / range / density / scale per visualizer.
+  toggle, remove, and tune Domain / Attribute / Type / Color plus
+  per-type controls (scale, density, arrow length, tag cap, …).
+- **GPU Overlay (default on)** draws Markers, Surface, and Arrows as
+  unlit Solid-mode ink — no Material Preview required. Turn it off in
+  the Viz panel to fall back to the Geometry Nodes + emission material
+  path.
 
 ## Why it's fast (and safe)
 
-A visualizer never touches the object it watches. It *watches* it:
-the visualizer's own Geometry Nodes modifier pulls the target's
-evaluated geometry through the depsgraph (Object Info / Collection
-Info) and generates marker geometry from it. Everything in the hot
-path is native C++ — no Python draw handlers, no per-frame re-reads.
-Animation and simulations visualize live for free, and toggling a
-visualizer never re-evaluates the watched object.
+A visualizer never mutates the object it watches. It *watches* it via
+Object Info / Collection Info through the depsgraph.
+
+**GPU Overlay (default):** sample evaluated attributes → upload GPU
+batches → `POST_VIEW` draw (points, false-color mesh, 4-sided cones).
+Works in **Solid** shading; F12 beauty stays clean (`hide_render` on
+viz carriers).
+
+**Materials fallback:** when GPU Overlay is off, the visualizer's own
+Geometry Nodes modifier generates marker / surface / arrow carriers
+and an emission material reads `vizcol`. Prefer **Material Preview**
+for that path.
+
+Tags stay on a capped BLF text path (semantic strings OK); see Roadmap
+for atlas work.
 
 ## Visualization axes
 
@@ -43,12 +55,15 @@ visualizer never re-evaluates the watched object.
 | --- | --- | --- |
 | **Domain** | `Point` \| `Edge` \| `Face` \| `Corner` | Localizes the read — Houdini-style. Face attrs draw on faces, not smeared to points. |
 | **Color** | `Heat` \| `RGB` \| `Random` | Heat = scalar through a ramp. RGB = vector channels. Random = stable hash color per element id (ints / categorical). |
-| **Type** | `Markers` \| `Surface` \| `Arrows` \| `Tags` | Markers / Surface / Arrows are GN carriers. **Tags** = GPU sprite+text prototype (capped; path toward a compiled display plugin). |
+| **Type** | `Markers` \| `Surface` \| `Arrows` \| `Tags` | **GPU Overlay:** Markers = points, Surface = false-color mesh, Arrows = 4-sided cones. **Tags** = BLF labels (Tag Cap = max count; Size = int px). |
 
 **RMB → Visualize Attribute** opens **domain submenus**, then attributes
 on that domain. Auto-pick is domain-aware (e.g. Face + int → Random +
 Surface). Overridable in the Viz panel; each visualizer owns its engine
 copy. Use **Enabled** to show one at a time — no compositing.
+
+Intrinsics **Index**, **Position**, and **Normal** are always available
+(GN fields / evaluated topology — not frozen authored ids).
 
 Scope: a visualizer can watch a single object, or a whole collection
 through its `Scope` socket — one visualizer covering many objects.
@@ -65,19 +80,25 @@ blender --command extension build --source-dir attrviz --output-dir build
 blender --command extension install-file --repo user_default --enable build/attrviz-<version>.zip
 ```
 
-Developed and tested on **Blender 5.2 LTS**; requires 5.0+.
+Developed against **Blender 5.0+** (tested on 5.0.1). Current addon
+version: **0.5.3**.
 
 ## Tests
 
-Analytic headless suite (no UI, exact assertions):
-
 ```
-blender --background --factory-startup --python-exit-code 1 --python tests/headless_test.py
+# Main suite (GN path + registry)
+blender --background --factory-startup --python-exit-code 1 \
+  --python tests/headless_test.py
+
+# GPU sampler / Surface / Arrows geometry (no draw in background)
+blender --background --factory-startup --python-exit-code 1 \
+  --python tests/test_gpu_sample.py
 ```
 
 ## Roadmap
 
-- Tags: digit-atlas shader + depth occlusion (compiled display plugin)
+- Tags: dynamic glyph atlas (semantic text at higher caps), then
+  compiled overlay if needed
 - HUD overlay for non-geometry data (custom properties, transforms)
 - VDB / volume grid visualization
 - Stronger Edge surface / wire display

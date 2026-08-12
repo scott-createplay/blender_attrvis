@@ -1,7 +1,7 @@
 """AttrViz GPU overlay — Solid-mode unlit Markers / Surface / Arrows.
 
-POST_VIEW draw handler. Behind scene.attrviz_gpu_markers (default off)
-so GN+materials remain the default until validated.
+POST_VIEW draw handler. Behind scene.attrviz_gpu_markers (default on).
+GN+materials remain available when the flag is off.
 
 Markers → points. Surface → false-color mesh tris.
 Arrows → batched 4-sided cones (non-vector → draw nothing).
@@ -25,7 +25,7 @@ GPU_DISPLAYS = frozenset({"Markers", "Surface", "Arrows"})
 
 def _scene_gpu_on(scene=None) -> bool:
     scene = scene or bpy.context.scene
-    return bool(getattr(scene, "attrviz_gpu_markers", False))
+    return bool(getattr(scene, "attrviz_gpu_markers", True))
 
 
 def invalidate_all():
@@ -459,9 +459,9 @@ def register():
             description=(
                 "Draw Markers / Surface / Arrows as unlit GPU ink in Solid "
                 "mode; hides GN carrier meshes. Tags stay on the text "
-                "prototype. Materials path remains when this is off"
+                "prototype. Turn off to use the materials/GN path"
             ),
-            default=False,
+            default=True,
             update=_on_gpu_flag_update,
         )
     if _handle is None:
