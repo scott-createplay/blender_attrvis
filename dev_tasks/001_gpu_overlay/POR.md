@@ -12,7 +12,7 @@ Build a **viewport GPU attribute overlay** for AttrViz: unlit data ink in **Soli
 
 If Python draw-handler depth/color cannot meet the bar, **escalate** mid-task to a compiled Overlay-engine path — with evidence — rather than papering over with scene meshes.
 
-## Status: Stage B — GPU Overlay + Tags Steps 1–2 (0.5.3)
+## Status: Stage B — GPU Overlay + Viz panel fixed (0.5.3)
 
 | Piece | State |
 |-------|--------|
@@ -20,8 +20,33 @@ If Python draw-handler depth/color cannot meet the bar, **escalate** mid-task to
 | Tags (BLF) | Shared sampler + cap; Size is int px (0.5.3) |
 | Standalone probe | Gate A met |
 | Real AttrViz GPU overlay | Markers + Surface + 4-sided Arrows; Tags Steps 1–2 |
+| **Viz N-panel layout** | **Fixed** — `layout.panel_prop` per viz (collapsible; header = Enabled + `attr · domain · type` + remove) |
 
 **Current AttrViz version:** `0.5.3`.
+
+---
+
+## Viz panel layout (resolved)
+
+### Was broken
+
+Manual `column`/`box` loops cascaded-indent headers; `bl_parent_id` subpanels indented by design; a `UIList` attempt overlapped controls. Root cause: nesting `UILayout` children across list rows, or using the wrong Blender list pattern for collapsible per-viz settings.
+
+### Fix (user-verified)
+
+Use Blender 5.0 **`layout.panel_prop(obj, "attrviz_ui_expand")`** on the **root** panel layout only (never inside `column`/`box`/`split`):
+
+- **Header:** Enabled checkbox + title (`attr · domain · type`) + remove — always visible for scanning/toggling.
+- **Body:** `_draw_viz_body` only when the layout panel is open (`body is not None`).
+- Accordion via existing `attrviz_ui_expand` update (one open at a time).
+
+Code: `attrviz/__init__.py` — `ATTRVIZ_PT_panel.draw`. Abandoned: `ATTRVIZ_UL_visualizers`, `ATTRVIZ_PT_settings` / `bl_parent_id`, `Scene.attrviz_viz_index`.
+
+Install path still ≠ repo — rsync/cp after edits; disable/enable addon or restart Blender.
+
+### Out of scope leftovers (Phase 7)
+
+- Tags glyph atlas, DistLook live smoke, probe thinning, README roadmap — after panel (done).
 
 ---
 
@@ -312,6 +337,7 @@ Not a hard gate for Stage B Markers.
 
 **Author**
 
+- [x] **Viz N-panel layout:** `layout.panel_prop` per viz (collapsible headers; `attr · domain · type`). User-verified.
 - [x] Surface: choose approach — (a) GPU face tint / mesh batch, (b) hybrid keep GN mesh + GPU color, or (c) defer with written rationale. Prefer (a) if Phase 3 face path scaled. **Done: (a) TRIS batch + domain colors + inflate.**
 - [ ] Live DistLook: `entity_id` / `dist_*` via AttrViz on sample_scene_3 mesh (Solid), side-by-side sheet language.
 - [ ] Thin probe to a thin wrapper or README pointing at `attrviz` module; avoid permanent duplicate stacks.
@@ -406,10 +432,8 @@ Ask: “If this were an AOV panel for the attr I’m sampling, would a human tru
 
 ## Handoff checklist for the next agent
 
-1. Read this POR end-to-end.
-2. Open both reference sheets; internalize **row 2** as the bar.
-3. Read Blender GPU overview + GPUViewport docs.
-4. **Start Stage A Phase 0** — probe only; do not edit `attrviz/` yet.
-5. Land Phase 2 pixels, then **immediately begin Stage B Phase 5** while finishing Phase 3.
-6. Update Status table as phases complete.
-7. Install into Blender when asking the user to click-test.
+1. Viz panel is fixed (`panel_prop`); do not revive UIList / `bl_parent_id` list experiments without new evidence.
+2. Phase 7 leftovers: DistLook live smoke, probe thin, screenshots, README roadmap, version bump.
+3. GPU overlay / Tags sampler: treat as done unless regression; do not re-litigate Stage A.
+4. Install into Blender when asking the user to click-test (repo ≠ extensions path).
+5. Update Status table as phases complete.

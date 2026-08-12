@@ -289,7 +289,7 @@ def add_visualizer(context, target=None, scope=None,
     node_builder.set_input(md, "Display", display)
     _sync_attr_is_vector(md)
     _ensure_viz_display_shading(context)
-    # Open settings for the new viz (accordion collapses others).
+    # Open this viz's layout panel (accordion closes others).
     try:
         obj.attrviz_ui_expand = True
     except Exception:
@@ -668,18 +668,20 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        migrate_all_visualizers(context.scene)
-        vizzes = visualizers(context.scene)
+        scene = context.scene
+        migrate_all_visualizers(scene)
+        vizzes = visualizers(scene)
         if not vizzes:
             layout.label(text="RMB → Visualize Attribute → Domain")
             layout.label(text="Viewport: Material Preview (emission viz)")
             return
+
         space = context.space_data
-        gpu_on = bool(getattr(context.scene, "attrviz_gpu_markers", True))
+        gpu_on = bool(getattr(scene, "attrviz_gpu_markers", True))
         if not _viz_display_shading_ok(space):
             _ensure_viz_display_shading(context)
         row = layout.row(align=True)
-        row.prop(context.scene, "attrviz_gpu_markers", text="GPU Overlay",
+        row.prop(scene, "attrviz_gpu_markers", text="GPU Overlay",
                  toggle=True)
         if gpu_on:
             row.label(text="Solid OK", icon='SHADING_SOLID')
@@ -688,76 +690,45 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
             row.operator("attrviz.use_viz_display_shading", text="",
                          icon='FILE_REFRESH')
 
-        # List only — no settings body here. Nested column/box/split in the
-        # same draw() as later rows is what nests headers in UILayout.
-        # Settings live in ATTRVIZ_PT_settings (separate layout tree).
+        # Heal sessions where every viz was left expanded.
         opened = [o for o in vizzes if o.attrviz_ui_expand]
         if len(opened) > 1:
             for o in opened[:-1]:
                 o.attrviz_ui_expand = False
 
-        for i, obj in enumerate(vizzes):
-            if i:
-                layout.separator()
+        # One layout panel per viz on the *root* layout only.
+        # panel_prop must not sit inside column/box/split (Blender API).
+        # Header: scan + Enabled + remove. Body: settings when open.
+        for obj in vizzes:
             md = viz_modifier(obj)
             attr_name = ""
             domain = ""
+            display = ""
             if md is not None:
                 try:
                     attr_name = node_builder.get_input(md, "Attribute") or ""
                     domain = node_builder.menu_input_name(md, "Domain") or ""
+                    display = node_builder.menu_input_name(md, "Display") or ""
                 except Exception:
                     pass
-            title = attr_name or obj.name
-            if attr_name and domain:
-                title = f"{attr_name}  ·  {domain}"
+            # Headline: attr · domain · type — so two viz on the same
+            # attr (e.g. flow Surface vs flow Arrows) stay distinct when collapsed.
+            parts = [p for p in (attr_name or obj.name, domain, display) if p]
+            title = "  ·  ".join(parts) if parts else obj.name
 
-            row = layout.row(align=True)
-            row.prop(obj, "attrviz_ui_expand", text="", emboss=False,
-                     icon=('TRIA_DOWN' if obj.attrviz_ui_expand
-                           else 'TRIA_RIGHT'))
-            row.label(text=title)
-            try:
-                row.separator_spacer()
-            except Exception:
-                row.separator()
-            row.prop(obj, "attrviz_enabled", text="Enabled", toggle=True)
-            op = row.operator(ATTRVIZ_OT_remove.bl_idname, text="",
-                              icon='X')
+            header, body = layout.panel_prop(obj, "attrviz_ui_expand")
+            # text="" required for checkbox-in-header (Blender layout panels).
+            header.prop(obj, "attrviz_enabled", text="")
+            header.label(text=title)
+            op = header.operator(ATTRVIZ_OT_remove.bl_idname, text="",
+                                 icon='X')
             op.name = obj.name
-
-
-class ATTRVIZ_PT_settings(bpy.types.Panel):
-    """Settings for the expanded visualizer — own layout, cannot nest the list."""
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = VIZ_PANEL_CATEGORY
-    bl_label = "Settings"
-    bl_parent_id = "ATTRVIZ_PT_panel"
-    bl_options = set()
-
-    @classmethod
-    def poll(cls, context):
-        scene = context.scene
-        if scene is None:
-            return False
-        return any(o.attrviz_ui_expand for o in visualizers(scene))
-
-    def draw(self, context):
-        layout = self.layout
-        for obj in visualizers(context.scene):
-            if not obj.attrviz_ui_expand:
+            if body is None:
                 continue
-            md = viz_modifier(obj)
             if md is None:
-                layout.label(text="Missing AttrViz modifier", icon='ERROR')
-                return
-            try:
-                attr_name = node_builder.get_input(md, "Attribute") or ""
-            except Exception:
-                attr_name = ""
-            _draw_viz_body(layout, obj, md, attr_name)
-            return
+                body.label(text="Missing AttrViz modifier", icon='ERROR')
+                continue
+            _draw_viz_body(body, obj, md, attr_name)
 
 
 def _draw_viz_body(body, obj, md, attr_name):
@@ -861,7 +832,6 @@ CLASSES = (
     ATTRVIZ_MT_domain_corner,
     ATTRVIZ_MT_visualize,
     ATTRVIZ_PT_panel,
-    ATTRVIZ_PT_settings,
 )
 
 
@@ -1003,5 +973,8 @@ def unregister():
                  "attrviz_style", "attrviz_display"):
         if hasattr(bpy.types.Object, attr):
             delattr(bpy.types.Object, attr)
+    # Drop leftover from the abandoned UIList experiment.
+    if hasattr(bpy.types.Scene, "attrviz_viz_index"):
+        delattr(bpy.types.Scene, "attrviz_viz_index")
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)
