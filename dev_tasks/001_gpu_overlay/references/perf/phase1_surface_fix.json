@@ -1,0 +1,442 @@
+{
+  "meta": {
+    "blend": "/Users/scott.peters/dev/hdr_synthetic_scene_pipeline/prototypes/pro_city_look_variation/scenes/sample_scene_3/user_scenes/sample_scene_3_look_seed__aov_test.blend",
+    "attr": "emission_strength",
+    "domain": "Point",
+    "displays": "Markers,Surface",
+    "max_targets": 1,
+    "notes": {
+      "targets": [
+        "SIGN"
+      ],
+      "watch_mesh_count": 1,
+      "last_sample_n.Markers": 19046,
+      "cold_n.SIGN.Markers": 19046,
+      "cold_n.SIGN.Surface": 33602
+    }
+  },
+  "spans": {
+    "harness.add.Markers": {
+      "n": 1,
+      "total_ms": 55.078000004868954,
+      "mean_ms": 55.078000004868954,
+      "min_ms": 55.078000004868954,
+      "max_ms": 55.078000004868954
+    },
+    "harness.add.Surface": {
+      "n": 1,
+      "total_ms": 0.4279160057194531,
+      "mean_ms": 0.4279160057194531,
+      "min_ms": 0.4279160057194531,
+      "max_ms": 0.4279160057194531
+    },
+    "harness.cold.Markers": {
+      "n": 1,
+      "total_ms": 322.0267499855254,
+      "mean_ms": 322.0267499855254,
+      "min_ms": 322.0267499855254,
+      "max_ms": 322.0267499855254
+    },
+    "harness.cold.Surface": {
+      "n": 1,
+      "total_ms": 666.8624590092804,
+      "mean_ms": 666.8624590092804,
+      "min_ms": 666.8624590092804,
+      "max_ms": 666.8624590092804
+    },
+    "harness.load_blend": {
+      "n": 1,
+      "total_ms": 547.1638749877457,
+      "mean_ms": 547.1638749877457,
+      "min_ms": 547.1638749877457,
+      "max_ms": 547.1638749877457
+    },
+    "harness.warm.Markers": {
+      "n": 2,
+      "total_ms": 6.4816250232979655,
+      "mean_ms": 3.2408125116489828,
+      "min_ms": 0.09616700117476285,
+      "max_ms": 6.385458022123203
+    },
+    "harness.warm.Surface": {
+      "n": 2,
+      "total_ms": 0.20620899158529937,
+      "mean_ms": 0.10310449579264969,
+      "min_ms": 0.0620420032646507,
+      "max_ms": 0.14416698832064867
+    },
+    "overlay.build_batch": {
+      "n": 3,
+      "total_ms": 44.871792022604495,
+      "mean_ms": 14.957264007534832,
+      "min_ms": 5.123959010234103,
+      "max_ms": 34.37645800295286
+    },
+    "overlay.cache_hit": {
+      "n": 3,
+      "total_ms": 0.0004169996827840805,
+      "mean_ms": 0.00013899989426136017,
+      "min_ms": 0.00012500095181167126,
+      "max_ms": 0.000166997779160738
+    },
+    "overlay.cache_key": {
+      "n": 6,
+      "total_ms": 0.11866603745147586,
+      "mean_ms": 0.01977767290857931,
+      "min_ms": 0.012250005966052413,
+      "max_ms": 0.028750015189871192
+    },
+    "overlay.colors": {
+      "n": 3,
+      "total_ms": 4.7626669984310865,
+      "mean_ms": 1.5875556661436956,
+      "min_ms": 0.3315419889986515,
+      "max_ms": 2.4565420171711594
+    },
+    "overlay.present.Markers": {
+      "n": 2,
+      "total_ms": 13.894207979319617,
+      "mean_ms": 6.947103989659809,
+      "min_ms": 5.747165996581316,
+      "max_ms": 8.147041982738301
+    },
+    "overlay.present.Surface": {
+      "n": 1,
+      "total_ms": 38.193332991795614,
+      "mean_ms": 38.193332991795614,
+      "min_ms": 38.193332991795614,
+      "max_ms": 38.193332991795614
+    },
+    "overlay.refresh.Markers": {
+      "n": 3,
+      "total_ms": 328.4710829902906,
+      "mean_ms": 109.49036099676353,
+      "min_ms": 0.08324999362230301,
+      "max_ms": 322.02137500280514
+    },
+    "overlay.refresh.Surface": {
+      "n": 3,
+      "total_ms": 666.9960409635678,
+      "mean_ms": 222.3320136545226,
+      "min_ms": 0.05883298581466079,
+      "max_ms": 666.8438749911729
+    },
+    "overlay.sample": {
+      "n": 2,
+      "total_ms": 314.28575099562295,
+      "mean_ms": 157.14287549781147,
+      "min_ms": 0.49866701010614634,
+      "max_ms": 313.7870839855168
+    },
+    "overlay.sample_miss.Markers": {
+      "n": 2,
+      "total_ms": 314.29291699896567,
+      "mean_ms": 157.14645849948283,
+      "min_ms": 0.5010419990867376,
+      "max_ms": 313.7918749998789
+    },
+    "overlay.sample_miss.Surface": {
+      "n": 1,
+      "total_ms": 628.5438339982647,
+      "mean_ms": 628.5438339982647,
+      "min_ms": 628.5438339982647,
+      "max_ms": 628.5438339982647
+    },
+    "overlay.surface_build": {
+      "n": 1,
+      "total_ms": 628.5371250123717,
+      "mean_ms": 628.5371250123717,
+      "min_ms": 628.5371250123717,
+      "max_ms": 628.5371250123717
+    },
+    "sample.build_surface_tris": {
+      "n": 1,
+      "total_ms": 628.5334999847692,
+      "mean_ms": 628.5334999847692,
+      "min_ms": 628.5334999847692,
+      "max_ms": 628.5334999847692
+    },
+    "sample.concat_density_cap": {
+      "n": 2,
+      "total_ms": 0.02116698306053877,
+      "mean_ms": 0.010583491530269384,
+      "min_ms": 0.009833980584517121,
+      "max_ms": 0.011333002476021647
+    },
+    "sample.depsgraph_mesh": {
+      "n": 3,
+      "total_ms": 312.9357510188129,
+      "mean_ms": 104.31191700627096,
+      "min_ms": 0.0031249946914613247,
+      "max_ms": 312.9184170102235
+    },
+    "sample.evaluated": {
+      "n": 3,
+      "total_ms": 314.5467489666771,
+      "mean_ms": 104.8489163222257,
+      "min_ms": 0.31962498906068504,
+      "max_ms": 313.754415983567
+    },
+    "sample.positions.Point": {
+      "n": 3,
+      "total_ms": 0.9049590153153986,
+      "mean_ms": 0.3016530051051329,
+      "min_ms": 0.26983401039615273,
+      "max_ms": 0.331540999468416
+    },
+    "sample.read_attr": {
+      "n": 3,
+      "total_ms": 0.030998984584584832,
+      "mean_ms": 0.010332994861528277,
+      "min_ms": 0.008208007784560323,
+      "max_ms": 0.01333298860117793
+    },
+    "sample.surface_tri_pack": {
+      "n": 1,
+      "total_ms": 624.547999992501,
+      "mean_ms": 624.547999992501,
+      "min_ms": 624.547999992501,
+      "max_ms": 624.547999992501
+    },
+    "sample.to_world": {
+      "n": 2,
+      "total_ms": 0.6432499794755131,
+      "mean_ms": 0.32162498973775655,
+      "min_ms": 0.17370798741467297,
+      "max_ms": 0.46954199206084013
+    },
+    "sample.visualizer_targets": {
+      "n": 2,
+      "total_ms": 314.2799999914132,
+      "mean_ms": 157.1399999957066,
+      "min_ms": 0.49683399265632033,
+      "max_ms": 313.7831659987569
+    }
+  },
+  "ranked_by_total_ms": [
+    {
+      "name": "overlay.refresh.Surface",
+      "n": 3,
+      "total_ms": 666.9960409635678,
+      "mean_ms": 222.3320136545226,
+      "min_ms": 0.05883298581466079,
+      "max_ms": 666.8438749911729
+    },
+    {
+      "name": "harness.cold.Surface",
+      "n": 1,
+      "total_ms": 666.8624590092804,
+      "mean_ms": 666.8624590092804,
+      "min_ms": 666.8624590092804,
+      "max_ms": 666.8624590092804
+    },
+    {
+      "name": "overlay.sample_miss.Surface",
+      "n": 1,
+      "total_ms": 628.5438339982647,
+      "mean_ms": 628.5438339982647,
+      "min_ms": 628.5438339982647,
+      "max_ms": 628.5438339982647
+    },
+    {
+      "name": "overlay.surface_build",
+      "n": 1,
+      "total_ms": 628.5371250123717,
+      "mean_ms": 628.5371250123717,
+      "min_ms": 628.5371250123717,
+      "max_ms": 628.5371250123717
+    },
+    {
+      "name": "sample.build_surface_tris",
+      "n": 1,
+      "total_ms": 628.5334999847692,
+      "mean_ms": 628.5334999847692,
+      "min_ms": 628.5334999847692,
+      "max_ms": 628.5334999847692
+    },
+    {
+      "name": "sample.surface_tri_pack",
+      "n": 1,
+      "total_ms": 624.547999992501,
+      "mean_ms": 624.547999992501,
+      "min_ms": 624.547999992501,
+      "max_ms": 624.547999992501
+    },
+    {
+      "name": "harness.load_blend",
+      "n": 1,
+      "total_ms": 547.1638749877457,
+      "mean_ms": 547.1638749877457,
+      "min_ms": 547.1638749877457,
+      "max_ms": 547.1638749877457
+    },
+    {
+      "name": "overlay.refresh.Markers",
+      "n": 3,
+      "total_ms": 328.4710829902906,
+      "mean_ms": 109.49036099676353,
+      "min_ms": 0.08324999362230301,
+      "max_ms": 322.02137500280514
+    },
+    {
+      "name": "harness.cold.Markers",
+      "n": 1,
+      "total_ms": 322.0267499855254,
+      "mean_ms": 322.0267499855254,
+      "min_ms": 322.0267499855254,
+      "max_ms": 322.0267499855254
+    },
+    {
+      "name": "sample.evaluated",
+      "n": 3,
+      "total_ms": 314.5467489666771,
+      "mean_ms": 104.8489163222257,
+      "min_ms": 0.31962498906068504,
+      "max_ms": 313.754415983567
+    },
+    {
+      "name": "overlay.sample_miss.Markers",
+      "n": 2,
+      "total_ms": 314.29291699896567,
+      "mean_ms": 157.14645849948283,
+      "min_ms": 0.5010419990867376,
+      "max_ms": 313.7918749998789
+    },
+    {
+      "name": "overlay.sample",
+      "n": 2,
+      "total_ms": 314.28575099562295,
+      "mean_ms": 157.14287549781147,
+      "min_ms": 0.49866701010614634,
+      "max_ms": 313.7870839855168
+    },
+    {
+      "name": "sample.visualizer_targets",
+      "n": 2,
+      "total_ms": 314.2799999914132,
+      "mean_ms": 157.1399999957066,
+      "min_ms": 0.49683399265632033,
+      "max_ms": 313.7831659987569
+    },
+    {
+      "name": "sample.depsgraph_mesh",
+      "n": 3,
+      "total_ms": 312.9357510188129,
+      "mean_ms": 104.31191700627096,
+      "min_ms": 0.0031249946914613247,
+      "max_ms": 312.9184170102235
+    },
+    {
+      "name": "harness.add.Markers",
+      "n": 1,
+      "total_ms": 55.078000004868954,
+      "mean_ms": 55.078000004868954,
+      "min_ms": 55.078000004868954,
+      "max_ms": 55.078000004868954
+    },
+    {
+      "name": "overlay.build_batch",
+      "n": 3,
+      "total_ms": 44.871792022604495,
+      "mean_ms": 14.957264007534832,
+      "min_ms": 5.123959010234103,
+      "max_ms": 34.37645800295286
+    },
+    {
+      "name": "overlay.present.Surface",
+      "n": 1,
+      "total_ms": 38.193332991795614,
+      "mean_ms": 38.193332991795614,
+      "min_ms": 38.193332991795614,
+      "max_ms": 38.193332991795614
+    },
+    {
+      "name": "overlay.present.Markers",
+      "n": 2,
+      "total_ms": 13.894207979319617,
+      "mean_ms": 6.947103989659809,
+      "min_ms": 5.747165996581316,
+      "max_ms": 8.147041982738301
+    },
+    {
+      "name": "harness.warm.Markers",
+      "n": 2,
+      "total_ms": 6.4816250232979655,
+      "mean_ms": 3.2408125116489828,
+      "min_ms": 0.09616700117476285,
+      "max_ms": 6.385458022123203
+    },
+    {
+      "name": "overlay.colors",
+      "n": 3,
+      "total_ms": 4.7626669984310865,
+      "mean_ms": 1.5875556661436956,
+      "min_ms": 0.3315419889986515,
+      "max_ms": 2.4565420171711594
+    },
+    {
+      "name": "sample.positions.Point",
+      "n": 3,
+      "total_ms": 0.9049590153153986,
+      "mean_ms": 0.3016530051051329,
+      "min_ms": 0.26983401039615273,
+      "max_ms": 0.331540999468416
+    },
+    {
+      "name": "sample.to_world",
+      "n": 2,
+      "total_ms": 0.6432499794755131,
+      "mean_ms": 0.32162498973775655,
+      "min_ms": 0.17370798741467297,
+      "max_ms": 0.46954199206084013
+    },
+    {
+      "name": "harness.add.Surface",
+      "n": 1,
+      "total_ms": 0.4279160057194531,
+      "mean_ms": 0.4279160057194531,
+      "min_ms": 0.4279160057194531,
+      "max_ms": 0.4279160057194531
+    },
+    {
+      "name": "harness.warm.Surface",
+      "n": 2,
+      "total_ms": 0.20620899158529937,
+      "mean_ms": 0.10310449579264969,
+      "min_ms": 0.0620420032646507,
+      "max_ms": 0.14416698832064867
+    },
+    {
+      "name": "overlay.cache_key",
+      "n": 6,
+      "total_ms": 0.11866603745147586,
+      "mean_ms": 0.01977767290857931,
+      "min_ms": 0.012250005966052413,
+      "max_ms": 0.028750015189871192
+    },
+    {
+      "name": "sample.read_attr",
+      "n": 3,
+      "total_ms": 0.030998984584584832,
+      "mean_ms": 0.010332994861528277,
+      "min_ms": 0.008208007784560323,
+      "max_ms": 0.01333298860117793
+    },
+    {
+      "name": "sample.concat_density_cap",
+      "n": 2,
+      "total_ms": 0.02116698306053877,
+      "mean_ms": 0.010583491530269384,
+      "min_ms": 0.009833980584517121,
+      "max_ms": 0.011333002476021647
+    },
+    {
+      "name": "overlay.cache_hit",
+      "n": 3,
+      "total_ms": 0.0004169996827840805,
+      "mean_ms": 0.00013899989426136017,
+      "min_ms": 0.00012500095181167126,
+      "max_ms": 0.000166997779160738
+    }
+  ]
+}

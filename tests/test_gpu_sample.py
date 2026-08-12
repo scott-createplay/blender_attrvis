@@ -114,22 +114,53 @@ if r_n:
           cone is not None and len(cone) == n_a * 12,
           f"verts={None if cone is None else len(cone)} n={n_a}")
 
-# Surface tris
+# Surface tris — identity topology (no inflate / filter / face stride)
 node_builder.set_input(md, "Display", "Surface")
 node_builder.set_input(md, "Domain", "Point")
 surf = gpu_sample.build_surface_tris(md, style="Heat")
 check("surface tris build", surf is not None)
 if surf:
-    spos, scols, sdt, ntri = surf
+    spos, svals, sdt, ntri = surf
     check("surface tri verts multiple of 3", len(spos) % 3 == 0, str(len(spos)))
-    check("surface colors match verts", len(scols) == len(spos))
+    check("surface corner values match verts", len(svals) == len(spos))
     check("surface has triangles", ntri > 0, str(ntri))
+    scols = gpu_color.values_to_colors(svals, sdt, "Heat")
+    check("surface colors match verts", len(scols) == len(spos))
     print(f"  surface stats: tris={ntri} verts={len(spos)} dtype={sdt}")
+
+    # Identity contract vs evaluated loop_triangles × matrix_world
+    deps = bpy.context.evaluated_depsgraph_get()
+    ev = grid.evaluated_get(deps)
+    me = ev.data
+    me.calc_loop_triangles()
+    n_lt = len(me.loop_triangles)
+    check("surface n_tris == loop_triangles", ntri == n_lt, f"{ntri} vs {n_lt}")
+    cos = np.empty(len(me.vertices) * 3, dtype=np.float32)
+    me.vertices.foreach_get("co", cos)
+    cos = cos.reshape(-1, 3)
+    expect = np.empty((n_lt * 3, 3), dtype=np.float32)
+    k = 0
+    for tri in me.loop_triangles:
+        for vi in tri.vertices:
+            expect[k] = cos[vi]
+            k += 1
+    mw = np.array(ev.matrix_world, dtype=np.float64).reshape(4, 4)
+    hom = np.empty((len(expect), 4), dtype=np.float64)
+    hom[:, :3] = expect
+    hom[:, 3] = 1.0
+    expect_w = (hom @ mw.T)[:, :3].astype(np.float32)
+    delta = np.max(np.abs(spos - expect_w)) if len(spos) == len(expect_w) else 1e9
+    check("surface positions identity (no inflate)", delta < 1e-5, f"max_delta={delta}")
 
 node_builder.set_input(md, "Domain", "Face")
 node_builder.set_input(md, "Attribute", "face_id")
 surf_f = gpu_sample.build_surface_tris(md, style="Random")
 check("surface face_id build", surf_f is not None and surf_f[3] > 0)
+if surf_f:
+    grid.data.calc_loop_triangles()
+    check("surface face n_tris == loop_triangles",
+          surf_f[3] == len(grid.data.loop_triangles),
+          f"{surf_f[3]} vs {len(grid.data.loop_triangles)}")
 
 # Restore Markers for GN fallback check
 node_builder.set_input(md, "Display", "Markers")
@@ -140,6 +171,23 @@ node_builder.set_input(md, "Domain", "Point")
 av.register()
 check("gpu overlay flag default on",
       bool(bpy.context.scene.attrviz_gpu_markers) is True)
+
+# Surface solid mute (z-fight): Target display_type → WIRE while Surface GPU on
+prev_dt = grid.display_type
+node_builder.set_input(md, "Display", "Surface")
+bpy.context.scene.attrviz_gpu_markers = True
+gpu_overlay.suppress_gn_carriers(bpy.context.scene)
+check("surface mute → WIRE", grid.display_type == "WIRE",
+      f"display_type={grid.display_type}")
+check("surface mute stashed prior",
+      "attrviz_surface_mute_prev" in grid)
+node_builder.set_input(md, "Display", "Markers")
+gpu_overlay.suppress_gn_carriers(bpy.context.scene)
+check("markers restores solid display",
+      grid.display_type == prev_dt,
+      f"display_type={grid.display_type} expected={prev_dt}")
+check("surface mute prop cleared",
+      "attrviz_surface_mute_prev" not in grid)
 
 # Existing geometry path still emits markers when GPU off
 bpy.context.scene.attrviz_gpu_markers = False

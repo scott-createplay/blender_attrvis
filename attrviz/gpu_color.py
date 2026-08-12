@@ -8,7 +8,7 @@ import numpy as np
 
 
 def heat_colors(values: np.ndarray, vmin=None, vmax=None) -> np.ndarray:
-    """Map float scalars → RGBA blue→cyan→green→yellow→red."""
+    """Map float scalars → RGBA blue→cyan→green→yellow→red (vectorized)."""
     v = np.asarray(values, dtype=np.float32).reshape(-1)
     if v.size == 0:
         return np.zeros((0, 4), dtype=np.float32)
@@ -29,31 +29,33 @@ def heat_colors(values: np.ndarray, vmin=None, vmax=None) -> np.ndarray:
         ],
         dtype=np.float32,
     )
-    edges = np.linspace(0.0, 1.0, len(stops))
-    rgba = np.empty((len(t), 4), dtype=np.float32)
-    for i, u in enumerate(t):
-        j = int(np.searchsorted(edges, u, side='right') - 1)
-        j = max(0, min(j, len(stops) - 2))
-        span = edges[j + 1] - edges[j]
-        f = 0.0 if span <= 0 else (u - edges[j]) / span
-        rgba[i] = stops[j] * (1.0 - f) + stops[j + 1] * f
-    return rgba
+    # 4 segments between 5 stops
+    seg = np.clip(t * 4.0, 0.0, 3.999)
+    j = np.floor(seg).astype(np.int32)
+    f = (seg - j).astype(np.float32)
+    rgba = stops[j] * (1.0 - f)[:, None] + stops[j + 1] * f[:, None]
+    return rgba.astype(np.float32, copy=False)
 
 
 def hash_colors(ids: np.ndarray, seed: int = 0) -> np.ndarray:
-    """Stable categorical hash → RGBA."""
+    """Stable categorical hash → RGBA (vectorized)."""
     a = np.asarray(ids).reshape(-1)
-    rgba = np.empty((len(a), 4), dtype=np.float32)
     seed = int(seed) & 0xFFFFFFFF
-    for i, raw in enumerate(a):
-        x = (int(raw) ^ seed) & 0xFFFFFFFF
-        x = (x ^ (x >> 16)) * 0x45D9F3B
-        x = (x ^ (x >> 16)) * 0x45D9F3B
-        x = x ^ (x >> 16)
-        r = ((x >> 0) & 0xFF) / 255.0
-        g = ((x >> 8) & 0xFF) / 255.0
-        b = ((x >> 16) & 0xFF) / 255.0
-        rgba[i] = (0.25 + 0.75 * r, 0.25 + 0.75 * g, 0.25 + 0.75 * b, 1.0)
+    # Cast via int64 to avoid overflow surprises, then mask
+    x = (a.astype(np.int64) ^ seed) & 0xFFFFFFFF
+    x = (x ^ (x >> 16)) * 0x45D9F3B
+    x = x & 0xFFFFFFFF
+    x = (x ^ (x >> 16)) * 0x45D9F3B
+    x = x & 0xFFFFFFFF
+    x = x ^ (x >> 16)
+    r = ((x >> 0) & 0xFF).astype(np.float32) / 255.0
+    g = ((x >> 8) & 0xFF).astype(np.float32) / 255.0
+    b = ((x >> 16) & 0xFF).astype(np.float32) / 255.0
+    rgba = np.empty((len(a), 4), dtype=np.float32)
+    rgba[:, 0] = 0.25 + 0.75 * r
+    rgba[:, 1] = 0.25 + 0.75 * g
+    rgba[:, 2] = 0.25 + 0.75 * b
+    rgba[:, 3] = 1.0
     return rgba
 
 

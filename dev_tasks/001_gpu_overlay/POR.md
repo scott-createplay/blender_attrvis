@@ -22,7 +22,14 @@ If Python draw-handler depth/color cannot meet the bar, **escalate** mid-task to
 | Real AttrViz GPU overlay | Markers + Surface + 4-sided Arrows; Tags Steps 1–2 |
 | **Viz N-panel layout** | **Fixed** — `layout.panel_prop` per viz (collapsible; header = Enabled + `attr · domain · type` + remove) |
 
-**Current AttrViz version:** `0.5.3`.
+**Current AttrViz version:** `0.5.7`.
+
+**Next (ordered):**
+
+1. **Phase 7b Arrows GPU instancing** — A0–A5 under Phase 7b (unit cone + `draw_instanced`; Length/Scale = instance rows only).  
+2. Scoping UX backlog — [`backlog.md`](backlog.md) (after Arrows).  
+3. Strangler Phase 2 / DistLook leftovers.  
+4. Surface P4 screenshot archive if not already saved.
 
 ---
 
@@ -338,20 +345,121 @@ Not a hard gate for Stage B Markers.
 **Author**
 
 - [x] **Viz N-panel layout:** `layout.panel_prop` per viz (collapsible headers; `attr · domain · type`). User-verified.
-- [x] Surface: choose approach — (a) GPU face tint / mesh batch, (b) hybrid keep GN mesh + GPU color, or (c) defer with written rationale. Prefer (a) if Phase 3 face path scaled. **Done: (a) TRIS batch + domain colors + inflate.**
+- [x] Surface: first land — (a) GPU TRI batch + domain colors (**wrong model**: parallel constructed mesh + inflate).  
+- [x] **Surface amendment (locked 2026-08-12):** Surface is a **reference to the original evaluated mesh**; only false-color changes. Markers/Arrows/Tags **construct** carriers; Surface must not. S1 identity pack landed in `gpu_sample.build_surface_tris` (0.5.6) — inflate / face_cap / outlier cull removed. **P4 visual gate still open** (user). Onboard: [`AGENT_ONBOARD_SURFACE_IDENTITY.md`](AGENT_ONBOARD_SURFACE_IDENTITY.md).
 - [ ] Live DistLook: `entity_id` / `dist_*` via AttrViz on sample_scene_3 mesh (Solid), side-by-side sheet language.
 - [ ] Thin probe to a thin wrapper or README pointing at `attrviz` module; avoid permanent duplicate stacks.
 - [ ] EEVEE/pixel or buffer tests where meaningful; **do not** rely only on “vizcol exists.”
 - [ ] Update README roadmap: GPU overlay Displays; materials as fallback.
-- [ ] Bump addon version; migrate path for existing viz.
+- [x] Bump addon version; migrate path for existing viz. (`0.5.6`)
 
 **Validate**
 
 - [ ] DistLook qualitative match to sheet row-2 language.
-- [ ] Full `tests/headless_test.py` green + any new overlay tests.
+- [ ] Surface visual: sample_scene_3 sign reads as **the sign’s surface** colored — not floating constructed hull/shards. (**P4 — user**)
+- [x] Automated: Surface positions == evaluated loop-tri world positions (no inflate delta); tri count == mesh. (`tests/test_gpu_sample.py`)
+- [x] Full `tests/headless_test.py` green + any new overlay tests.
+- [x] Harness before/after JSON under `references/perf/` (Surface pack cost down; Markers flat). See P3 notes below.
 - [ ] User-verified Solid workflow.
 
-**Exit:** POR complete — or escalate note if Surface needs compiled plugin.
+**Exit:** Surface reference model validated — or escalate note if Solid needs compiled plugin.
+
+##### Surface identity progressive plan (P0–P5)
+
+Scope: **S1 identity Surface only.** Markers/Arrows/Tags unchanged. Do **not** start Phase 7b or strangler Phase 2. Do **not** “fix” visuals with inflate / outlier cull / face stride. If identity loses Solid depth with evidence → document and propose S2 (hybrid GN reference) or escalate.
+
+| Step | Work | Validate / hard stop | Status |
+|------|------|----------------------|--------|
+| **P0 — Baseline** | Inflate/construct perf reference | `references/perf/surface_before_identity.json` (annotated copy of `phase1_after.json` — true P0 mid-run was overwritten by identity) | done |
+| **P1 — Identity pack** | Strip inflate / face_cap / outlier; vectorized identity expand | `test_gpu_sample.py` identity + tri-count checks | done |
+| **P2 — Overlay hygiene** | `_sample_surface` docs; no inflate knobs; L0/L2 cache unchanged | `headless_test.py` 30/30 | done |
+| **P3 — Perf after** | Same harness → `surface_after_identity.json` | SIGN 1-target: `build_surface_tris` **271 → 65 ms**; cold Surface **309 → 98 ms**; Markers cold ~flat (~352–377 ms) | done |
+| **P4 — Visual gate** | Sync install (done 0.5.6); sample_scene_3 Point · Surface · Heat | Screenshot → `references/attrviz_surface_identity_sign.png`; depth shred → S2, no inflate | **open** |
+| **P5 — Closeout** | Check boxes; Next → DistLook leftovers; commit if asked | Phase 7b stays blocked until visual gate + user ask | partial |
+
+**Perf delta (SIGN / `emission_strength` / Markers+Surface / max-targets 1):**
+
+| Span | Before (inflate) | After (identity) |
+|------|------------------|------------------|
+| `sample.build_surface_tris` | 271 ms | 65 ms |
+| `sample.surface_tri_pack` | 267 ms | 64 ms |
+| `harness.cold.Surface` | 309 ms | 98 ms |
+| `harness.cold.Markers` | ~377 ms | ~352 ms (flat) |
+
+Harness template:
+
+```bash
+blender --background --python-exit-code 1 \
+  --python dev_tasks/001_gpu_overlay/tests/profile_overlay_harness.py -- \
+  --max-targets 1 --displays Markers,Surface --warm 2 \
+  --json dev_tasks/001_gpu_overlay/references/perf/surface_after_identity.json
+```
+
+---
+
+#### Phase 7b — Arrows GPU instancing (follow-on; after Surface)
+
+**Blocked on:** Phase 7 Surface identity + solid mute validated (do not interleave with scoping UX).
+
+**Why:** Today Arrows expand every sample into a unique 12-vert cone soup on the CPU (`_arrow_cone_geometry_impl`) and re-upload on Length/Scale scrub. Markers are already light (points). Arrows are the heavy constructed Display.
+
+**Target pipe:**
+
+```text
+TODAY
+  L0 sample: positions + vectors
+  L2 present: expand 4-side cone → 12N world verts (CPU)
+  upload full TRI batch + builtin SMOOTH_COLOR
+
+TARGET
+  L0 sample: same (unchanged)
+  once: unit cone indexed batch (4-side)
+  L2 present: N instance rows (origin, basis/dir, length, radius, color)
+  custom shader: unit cone × instance transform
+  GPUBatch.draw_instanced(shader, instance_count=N)
+```
+
+**Instance row layout (draft):**
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `origin` | vec3 | sample world position (cone base) |
+| `dir` | vec3 | unit direction (drop if ‖v‖≈0) |
+| `length` | float | socket Length |
+| `radius` | float | `Scale * 0.35` (GN spirit) |
+| `color` | vec4 | Arrow Color (uniform OK if one color/viz) |
+
+Shader transforms unit cone (base at origin, tip +Z) into world via orthonormal basis from `dir` (same math as today’s CPU expand).
+
+##### Progressive plan (A0–A5)
+
+| Step | Work | Validate / hard stop |
+|------|------|----------------------|
+| **A0 — Baseline** | Harness Arrows cold + `--scrub` Length before change | `references/perf/arrows_before_instancing.json` |
+| **A1 — API spike** | Prove custom shader + `draw_instanced` (or string GLSL fallback) in Blender 5.0.1 | Tiny script draws N dummy cones; if CreateInfo unusable from extension → try `GPUShader(vert, frag)`; escalate only if both dead |
+| **A2 — Unit cone** | Build shared indexed unit cone batch once (module cache) | 4-side; tip +Z; base ring at z=0 |
+| **A3 — Instance present** | Replace soup in `_refresh_arrows`: L0 → alive filter → instance buffer; Length/Scale/Color update instances only | `overlay.arrow_cones` / present cost ≪ baseline on scrub; visual parity on test grid / `flow` |
+| **A4 — Draw path** | Entry carries instanced batch + shader; POST_VIEW calls `draw_instanced` | Markers/Surface unchanged; non-vector → empty |
+| **A5 — Closeout** | Drop soup from hot path (keep as optional oracle/test helper); harness after JSON; version bump; POR checkboxes | Scoping UX stays in [`backlog.md`](backlog.md) |
+
+**Author**
+
+- [ ] Unit cone mesh + indexed `GPUBatch` (4-side OK to start).
+- [ ] Instance buffer from L0 sample + Length/Scale; custom shader (`GPUShaderCreateInfo` or GLSL string fallback).
+- [ ] Presentation cache: Length/Scale updates instance rows — **not** 12N vert rebuild.
+- [ ] Keep non-vector → empty honesty; density/cap unchanged at sample layer.
+- [ ] Leave Markers as POINTS; no GN for GPU Overlay Arrows.
+- [ ] Execute **A0–A5** above.
+
+**Validate**
+
+- [ ] Visual parity with current 4-side cones on sample_scene_3 / test grid / cube `flow`.
+- [ ] Harness: `harness.scrub.Length` and Arrows present cost ≪ expanded-soup baseline; JSON under `references/perf/`.
+- [ ] Headless / gpu_sample cone contract still green (or updated for instance path: `n` arrows, not 12N verts).
+
+**Exit:** Arrows = instance transforms; soup path removed from hot path.
+
+**Out of scope for 7b:** Target/Scope panel UX, attribute discovery, Surface mute changes, strangler Phase 2.
 
 ---
 
@@ -418,12 +526,22 @@ blender --background --factory-startup --python-exit-code 1 \
 # AttrViz suite (must stay green through Stage B)
 blender --background --factory-startup --python-exit-code 1 \
   --python tests/headless_test.py
+
+# GPU sample / Surface identity contract
+blender --background --python-exit-code 1 --python tests/test_gpu_sample.py
+
+# Overlay perf harness (Surface identity P0/P3)
+blender --background --python-exit-code 1 \
+  --python dev_tasks/001_gpu_overlay/tests/profile_overlay_harness.py -- \
+  --max-targets 1 --displays Markers,Surface --warm 2 \
+  --json /tmp/attrviz_surface_perf.json
 ```
 
 Visual bar:
 
 ```text
 dev_tasks/001_gpu_overlay/references/sample_scene_3_distlook_aov_sheet.png  # row 2
+dev_tasks/001_gpu_overlay/references/attrviz_surface_identity_sign.png      # Phase 7 Surface gate
 ```
 
 Ask: “If this were an AOV panel for the attr I’m sampling, would a human trust it?”
@@ -433,7 +551,8 @@ Ask: “If this were an AOV panel for the attr I’m sampling, would a human tru
 ## Handoff checklist for the next agent
 
 1. Viz panel is fixed (`panel_prop`); do not revive UIList / `bl_parent_id` list experiments without new evidence.
-2. Phase 7 leftovers: DistLook live smoke, probe thin, screenshots, README roadmap, version bump.
-3. GPU overlay / Tags sampler: treat as done unless regression; do not re-litigate Stage A.
-4. Install into Blender when asking the user to click-test (repo ≠ extensions path).
-5. Update Status table as phases complete.
+2. **Next:** Phase 7 **P4 visual gate** (identity Surface on sample_scene_3). P0–P3 done (0.5.6). Do not start Phase 7b until visual gate passes.
+3. After Surface visual: DistLook live smoke, probe thin, screenshots, README roadmap.
+4. GPU overlay / Tags sampler: treat as done unless regression; do not re-litigate Stage A.
+5. Install into Blender when asking the user to click-test (repo ≠ extensions path).
+6. Update Status table as phases complete.

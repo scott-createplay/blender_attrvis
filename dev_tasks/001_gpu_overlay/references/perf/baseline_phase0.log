@@ -1,0 +1,109 @@
+00:00.337  blend            | Read blend: "/Users/scott.peters/dev/hdr_synthetic_scene_pipeline/prototypes/pro_city_look_variation/scenes/sample_scene_3/user_scenes/sample_scene_3_look_seed__aov_test.blend"
+/Users/scott.peters/dev/blender_attrvis/attrviz/gpu_sample.py:110: RuntimeWarning: divide by zero encountered in matmul
+  return (hom @ mw.T)[:, :3].astype(np.float32)
+/Users/scott.peters/dev/blender_attrvis/attrviz/gpu_sample.py:110: RuntimeWarning: overflow encountered in matmul
+  return (hom @ mw.T)[:, :3].astype(np.float32)
+/Users/scott.peters/dev/blender_attrvis/attrviz/gpu_sample.py:110: RuntimeWarning: invalid value encountered in matmul
+  return (hom @ mw.T)[:, :3].astype(np.float32)
+register_class(...):
+Info: Registering operator class: 'ATTRVIZ_OT_add', bl_idname 'attrviz.add' has been registered before, unregistering previous
+register_class(...):
+Info: Registering operator class: 'ATTRVIZ_OT_remove', bl_idname 'attrviz.remove' has been registered before, unregistering previous
+register_class(...):
+Info: Registering operator class: 'ATTRVIZ_OT_use_viz_display_shading', bl_idname 'attrviz.use_viz_display_shading' has been registered before, unregistering previous
+register_class(...):
+Info: Registering menu class: 'ATTRVIZ_MT_domain_point', bl_idname 'ATTRVIZ_MT_domain_point' has been registered before, unregistering previous
+register_class(...):
+Info: Registering menu class: 'ATTRVIZ_MT_domain_edge', bl_idname 'ATTRVIZ_MT_domain_edge' has been registered before, unregistering previous
+register_class(...):
+Info: Registering menu class: 'ATTRVIZ_MT_domain_face', bl_idname 'ATTRVIZ_MT_domain_face' has been registered before, unregistering previous
+register_class(...):
+Info: Registering menu class: 'ATTRVIZ_MT_domain_corner', bl_idname 'ATTRVIZ_MT_domain_corner' has been registered before, unregistering previous
+register_class(...):
+Info: Registering menu class: 'ATTRVIZ_MT_visualize', bl_idname 'ATTRVIZ_MT_visualize' has been registered before, unregistering previous
+register_class(...):
+Info: Registering panel class: 'ATTRVIZ_PT_panel', bl_idname 'ATTRVIZ_PT_panel' has been registered before, unregistering previous
+register_class(...):
+Info: Registering operator class: 'ATTRVIZ_OT_toggle_gpu_markers', bl_idname 'attrviz.toggle_gpu_markers' has been registered before, unregistering previous
+
+Harness targets (1): SIGN
+Displays: ['Markers', 'Surface']
+
+  cold Markers  @ SIGN: n=19046
+  cold Surface  @ SIGN: n=33280
+=== AttrViz perf report ===
+  blend: /Users/scott.peters/dev/hdr_synthetic_scene_pipeline/prototypes/pro_city_look_variation/scenes/sample_scene_3/user_scenes/sample_scene_3_look_seed__aov_test.blend
+  attr: emission_strength
+  domain: Point
+  displays: Markers,Surface
+  max_targets: 1
+  notes:
+    targets: ['SIGN']
+    watch_mesh_count: 1
+    last_sample_n.Markers: 1914
+    cold_n.SIGN.Markers: 19046
+    cold_n.SIGN.Surface: 33280
+  span                                         n   total_ms    mean_ms     max_ms
+  ------------------------------------------------------------------------------
+  harness.load_blend                           1    1433.59    1433.59    1433.59
+  overlay.refresh.Surface                      9     463.50      51.50     308.12
+  harness.add.Markers                          1     393.29     393.29     393.29
+  harness.cold.Surface                         1     308.13     308.13     308.13
+  harness.add.Surface                          1     303.55     303.55     303.55
+  overlay.sample_miss.Surface                  1     270.31     270.31     270.31
+  overlay.surface_build                        1     270.31     270.31     270.31
+  sample.build_surface_tris                    1     270.31     270.31     270.31
+  sample.surface_tri_pack                      1     265.94     265.94     265.94
+  overlay.build_batch                         16     210.93      13.18      33.91
+  overlay.present.Surface                      6     192.55      32.09      37.70
+  harness.scrub.Range                          2     184.69      92.34     155.40
+  overlay.refresh.Markers                     13      70.82       5.45      16.32
+  overlay.present.Markers                     10      48.47       4.85       8.59
+  overlay.sample_miss.Markers                  5      21.47       4.29       7.64
+  overlay.sample                               5      21.45       4.29       7.63
+  sample.visualizer_targets                    5      21.44       4.29       7.63
+  harness.scrub.Density                        1      18.39      18.39      18.39
+  harness.cold.Markers                         1      16.33      16.33      16.33
+  overlay.colors                              16      15.78       0.99       2.58
+  sample.concat_density_cap                    5      11.78       2.36       4.15
+  sample.evaluated                             6       9.89       1.65       7.59
+  harness.warm.Markers                         3       6.98       2.33       6.84
+  sample.depsgraph_mesh                        6       5.11       0.85       5.07
+  sample.to_world                              5       2.79       0.56       2.16
+  sample.positions.Point                       6       1.84       0.31       0.33
+  overlay.cache_key                           22       0.31       0.01       0.03
+  harness.warm.Surface                         3       0.17       0.06       0.06
+  sample.read_attr                             6       0.07       0.01       0.02
+  overlay.sample_hit                          10       0.00       0.00       0.00
+Wrote JSON: /Users/scott.peters/dev/blender_attrvis/dev_tasks/001_gpu_overlay/references/perf/baseline_phase0.json
+
+Top spans by total_ms:
+    1433.6 ms  n=1     harness.load_blend
+     463.5 ms  n=9     overlay.refresh.Surface
+     393.3 ms  n=1     harness.add.Markers
+     308.1 ms  n=1     harness.cold.Surface
+     303.5 ms  n=1     harness.add.Surface
+     270.3 ms  n=1     overlay.sample_miss.Surface
+     270.3 ms  n=1     overlay.surface_build
+     270.3 ms  n=1     sample.build_surface_tris
+     265.9 ms  n=1     sample.surface_tri_pack
+     210.9 ms  n=16    overlay.build_batch
+     192.5 ms  n=6     overlay.present.Surface
+     184.7 ms  n=2     harness.scrub.Range
+      70.8 ms  n=13    overlay.refresh.Markers
+      48.5 ms  n=10    overlay.present.Markers
+      21.5 ms  n=5     overlay.sample_miss.Markers
+
+Harness done.
+Traceback (most recent call last):
+  File "/Applications/Blender.app/Contents/Resources/5.0/scripts/modules/addon_utils.py", line 566, in disable
+    mod.unregister()
+  File "/Users/scott.peters/Library/Application Support/Blender/5.0/extensions/user_default/attrviz/__init__.py", line 980, in unregister
+    gpu_overlay.unregister()
+  File "/Users/scott.peters/Library/Application Support/Blender/5.0/extensions/user_default/attrviz/gpu_overlay.py", line 597, in unregister
+    bpy.utils.unregister_class(cls)
+RuntimeError: unregister_class(...):, missing bl_rna attribute from '_RNAMeta' instance (may not be registered)
+Exception in module unregister(): '/Users/scott.peters/Library/Application Support/Blender/5.0/extensions/user_default/attrviz/__init__.py'
+Blender 5.0.1 (hash a3db93c5b259 built 2025-12-16 01:51:40)
+
+Blender quit

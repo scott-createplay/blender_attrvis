@@ -23,6 +23,11 @@ from gpu_extras.batch import batch_for_shader
 
 from . import gpu_sample, node_builder
 
+try:
+    from . import perf
+except Exception:  # pragma: no cover
+    perf = None
+
 _handle = None
 _shader = None
 
@@ -82,6 +87,16 @@ def _value_at(values, i, dtype):
 
 def _collect_tags(md, cam_pos, cap, facing_cull):
     """Nearest-first capped tags via shared gpu_sample (Target∪Scope)."""
+    if perf is not None:
+        ctx = perf.span("tags.collect")
+    else:
+        from contextlib import nullcontext
+        ctx = nullcontext()
+    with ctx:
+        return _collect_tags_impl(md, cam_pos, cap, facing_cull)
+
+
+def _collect_tags_impl(md, cam_pos, cap, facing_cull):
     try:
         target = node_builder.get_input(md, "Target")
         scope = node_builder.get_input(md, "Scope")

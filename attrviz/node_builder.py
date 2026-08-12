@@ -14,7 +14,7 @@ Axes (Index Switch ints — Menu sockets break on 5.0 modifier ID-props):
 """
 import bpy
 
-VERSION = "0.5.3"
+VERSION = "0.5.7"
 ENGINE_NAME = "AttrViz Engine"
 # Baked on mesh before Mesh to Points — Input Normal is (0,0,0) on points.
 AV_NORMAL_ATTR = ".attrviz_normal"

@@ -19,6 +19,11 @@ import attrviz as av  # noqa: E402
 PASS = 0
 FAIL = 0
 
+# This suite cooks the materials/GN path (vizcol / vizval). GPU Overlay
+# (default on) suppresses GN carriers — turn it off for these checks.
+av.register()
+bpy.context.scene.attrviz_gpu_markers = False
+
 
 def check(name, cond, detail=""):
     global PASS, FAIL
@@ -366,6 +371,7 @@ check("V8a visualizers registry lists all entries",
       n_viz == 9,
       f"count={n_viz} {[o.name for o in av.visualizers(bpy.context.scene)]}")
 try:
+    av.unregister()
     av.register()
     av.unregister()
     check("V8b addon register/unregister clean", True)

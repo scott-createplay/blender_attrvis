@@ -15,9 +15,11 @@ import numpy as np
 from gpu_extras.batch import batch_for_shader
 
 from . import gpu_color, gpu_sample, node_builder
+from . import perf
 
 _handle = None
 _caches: dict = {}
+_sample_caches: dict = {}
 
 VECTORISH = frozenset({'FLOAT_VECTOR', 'FLOAT2'})
 GPU_DISPLAYS = frozenset({"Markers", "Surface", "Arrows"})
@@ -30,7 +32,72 @@ def _scene_gpu_on(scene=None) -> bool:
 
 def invalidate_all():
     _caches.clear()
+    _sample_caches.clear()
 
+
+def invalidate(obj=None):
+    """Drop caches for one visualizer, or all if ``obj`` is None."""
+    if obj is None:
+        invalidate_all()
+        return
+    ptr = obj.as_pointer()
+    _caches.pop(ptr, None)
+    _sample_caches.pop(ptr, None)
+
+
+def _socket_bundle(md):
+    try:
+        attr = node_builder.get_input(md, "Attribute")
+        domain = node_builder.menu_input_name(md, "Domain")
+        style = node_builder.menu_input_name(md, "Style")
+        density = float(node_builder.get_input(md, "Density") or 1.0)
+        seed = int(node_builder.get_input(md, "Seed") or 0)
+        auto = bool(node_builder.get_input(md, "Auto Range"))
+        rmin = float(node_builder.get_input(md, "Range Min") or 0.0)
+        rmax = float(node_builder.get_input(md, "Range Max") or 1.0)
+        length = float(node_builder.get_input(md, "Length") or 0.08)
+        scale = float(node_builder.get_input(md, "Scale") or 0.02)
+        acol = node_builder.get_input(md, "Arrow Color")
+        if acol is not None:
+            acol = tuple(float(c) for c in acol[:4])
+        else:
+            acol = (0.2, 0.6, 1.0, 1.0)
+    except Exception:
+        attr, domain, style = "", "Point", "Heat"
+        density, seed, auto, rmin, rmax = 1.0, 0, True, 0.0, 1.0
+        length, scale, acol = 0.08, 0.02, (0.2, 0.6, 1.0, 1.0)
+    return {
+        "attr": attr, "domain": domain, "style": style,
+        "density": density, "seed": seed, "auto": auto,
+        "rmin": rmin, "rmax": rmax, "length": length, "scale": scale,
+        "acol": acol,
+    }
+
+
+def _sample_key(obj, display, cap, sock, fp):
+    """L0 — what we sample / subsample (topology constant ⇒ stable)."""
+    return (
+        obj.as_pointer(), display, sock["attr"], sock["domain"],
+        sock["density"], sock["seed"], int(cap), fp,
+    )
+
+
+def _present_key(display, sock, extra=()):
+    """L1/L2 — presentation only (Length / Range / Style / Color / Scale)."""
+    return (
+        display, sock["style"], sock["auto"], sock["rmin"], sock["rmax"],
+        sock["length"], sock["scale"], sock["acol"], sock["seed"], extra,
+    )
+
+
+def _viz_cache_key(obj, md, display, extra=(), cap=50000):
+    """Full key (sample + present)."""
+    sock = _socket_bundle(md)
+    fp = gpu_sample.watch_fingerprint(md)
+    return (
+        _sample_key(obj, display, cap, sock, fp)
+        + _present_key(display, sock, extra=extra)
+    )
 
 def _gpu_visualizers(scene):
     from . import visualizers, viz_modifier
@@ -52,7 +119,12 @@ def _gpu_visualizers(scene):
 
 
 def _suppress_gn_carriers(scene):
-    """When GPU overlay on, hide GN carrier mesh for Markers/Surface/Arrows."""
+    """When GPU overlay on, hide GN carrier mesh for Markers/Surface/Arrows.
+
+    Call from state changes (GPU flag, Enabled, Display) — never from the
+    draw handler (writing modifiers there thrashs the depsgraph).
+    Also syncs Surface target solid-mute (z-fight).
+    """
     from . import visualizers, viz_modifier
     use_gpu = _scene_gpu_on(scene)
     for obj in visualizers(scene):
@@ -71,27 +143,146 @@ def _suppress_gn_carriers(scene):
                 md.show_viewport = False
         elif enabled and not md.show_viewport:
             md.show_viewport = True
+    _sync_surface_target_mute(scene)
 
 
+# --- Surface target mute (identity GPU Surface vs Workbench solid) -----
+# Stash Object.display_type and set WIRE for meshes in the active Surface
+# watch set (Target∪Scope). Same scoping as sampling — no attr discovery.
+_MUTE_PROP = "attrviz_surface_mute_prev"
+_MUTE_DISPLAY = "WIRE"
+_muted_ptrs: set = set()
+
+
+def _active_surface_watch_meshes(scene):
+    """Meshes covered by enabled GPU Surface visualizers (Target∪Scope)."""
+    from . import visualizers, viz_modifier
+    if not _scene_gpu_on(scene):
+        return []
+    seen = set()
+    out = []
+    for viz in visualizers(scene):
+        if viz.hide_viewport:
+            continue
+        md = viz_modifier(viz)
+        if md is None:
+            continue
+        try:
+            display = node_builder.menu_input_name(md, "Display")
+        except Exception:
+            continue
+        if display != "Surface":
+            continue
+        try:
+            target = node_builder.get_input(md, "Target")
+            scope = node_builder.get_input(md, "Scope")
+        except Exception:
+            continue
+        for mesh in gpu_sample.iter_watch_meshes(target, scope):
+            key = mesh.as_pointer()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(mesh)
+    return out
+
+
+def _mute_target_solid(obj):
+    """AttrViz-owned solid mute; stash prior display_type once."""
+    if obj is None:
+        return
+    ptr = obj.as_pointer()
+    if _MUTE_PROP not in obj:
+        try:
+            obj[_MUTE_PROP] = str(obj.display_type)
+        except Exception:
+            obj[_MUTE_PROP] = "TEXTURED"
+    try:
+        if obj.display_type != _MUTE_DISPLAY:
+            obj.display_type = _MUTE_DISPLAY
+    except Exception:
+        pass
+    _muted_ptrs.add(ptr)
+
+
+def _restore_target_solid(obj):
+    """Restore stashed display_type if we muted this object."""
+    if obj is None:
+        return
+    ptr = obj.as_pointer()
+    prev = obj.get(_MUTE_PROP) if _MUTE_PROP in obj else None
+    if prev is not None:
+        try:
+            if obj.display_type == _MUTE_DISPLAY:
+                obj.display_type = prev
+        except Exception:
+            pass
+        try:
+            del obj[_MUTE_PROP]
+        except Exception:
+            pass
+    _muted_ptrs.discard(ptr)
+
+
+def _sync_surface_target_mute(scene=None):
+    """Idempotent: mute watch-set solids for active GPU Surface vizs.
+
+    Safe to call often (depsgraph / state changes). Never from assumptions
+    about attribute-name discovery — only Target∪Scope.
+    """
+    scene = scene or bpy.context.scene
+    desired = _active_surface_watch_meshes(scene)
+    desired_ptrs = {o.as_pointer(): o for o in desired}
+
+    # Restore anything we muted that is no longer desired.
+    for ptr in list(_muted_ptrs):
+        if ptr in desired_ptrs:
+            continue
+        obj = None
+        for candidate in bpy.data.objects:
+            if candidate.as_pointer() == ptr:
+                obj = candidate
+                break
+        if obj is not None:
+            _restore_target_solid(obj)
+        else:
+            _muted_ptrs.discard(ptr)
+
+    for ptr, obj in desired_ptrs.items():
+        _mute_target_solid(obj)
+
+
+def restore_all_surface_mutes():
+    """Unregister / GPU-off cleanup — restore every AttrViz-muted mesh."""
+    for obj in list(bpy.data.objects):
+        if _MUTE_PROP in obj:
+            _restore_target_solid(obj)
+    _muted_ptrs.clear()
+
+
+# Public alias for callers in __init__.py
+suppress_gn_carriers = _suppress_gn_carriers
 # Back-compat alias
 _suppress_gn_markers = _suppress_gn_carriers
+sync_surface_target_mute = _sync_surface_target_mute
 
 
 def _build_batch(positions, colors, prim='POINTS'):
-    pos_list = [tuple(p) for p in positions]
-    try:
-        shader = gpu.shader.from_builtin('SMOOTH_COLOR')
-        col_list = [tuple(c) for c in colors]
-        batch = batch_for_shader(
-            shader, prim, {"pos": pos_list, "color": col_list},
-        )
-        return batch, shader, "smooth"
-    except Exception:
-        shader = gpu.shader.from_builtin('UNIFORM_COLOR')
-        batch = batch_for_shader(
-            shader, prim, {"pos": pos_list},
-        )
-        return batch, shader, "uniform"
+    with perf.span("overlay.build_batch"):
+        pos_list = [tuple(p) for p in positions]
+        try:
+            shader = gpu.shader.from_builtin('SMOOTH_COLOR')
+            col_list = [tuple(c) for c in colors]
+            batch = batch_for_shader(
+                shader, prim, {"pos": pos_list, "color": col_list},
+            )
+            return batch, shader, "smooth"
+        except Exception:
+            shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+            batch = batch_for_shader(
+                shader, prim, {"pos": pos_list},
+            )
+            return batch, shader, "uniform"
 
 
 def _arrow_cone_geometry(positions, values, length: float, radius: float,
@@ -100,6 +291,14 @@ def _arrow_cone_geometry(positions, values, length: float, radius: float,
 
     Returns (tri_verts Mx3, n_arrows) with M = n_arrows * sides * 3.
     """
+    with perf.span("overlay.arrow_cones"):
+        return _arrow_cone_geometry_impl(
+            positions, values, length, radius, sides=sides,
+        )
+
+
+def _arrow_cone_geometry_impl(positions, values, length: float, radius: float,
+                              sides: int = 4):
     v = np.asarray(values, dtype=np.float32)
     if v.ndim != 2 or v.shape[1] < 2:
         return None, 0
@@ -161,47 +360,12 @@ def _arrow_cone_geometry(positions, values, length: float, radius: float,
     return tri_pos, n
 
 
-def _viz_cache_key(obj, md, display, n, extra=()):
-    try:
-        attr = node_builder.get_input(md, "Attribute")
-        domain = node_builder.menu_input_name(md, "Domain")
-        style = node_builder.menu_input_name(md, "Style")
-        density = float(node_builder.get_input(md, "Density") or 1.0)
-        seed = int(node_builder.get_input(md, "Seed") or 0)
-        auto = bool(node_builder.get_input(md, "Auto Range"))
-        rmin = float(node_builder.get_input(md, "Range Min") or 0.0)
-        rmax = float(node_builder.get_input(md, "Range Max") or 1.0)
-        length = float(node_builder.get_input(md, "Length") or 0.08)
-        scale = float(node_builder.get_input(md, "Scale") or 0.02)
-        acol = node_builder.get_input(md, "Arrow Color")
-        if acol is not None:
-            acol = tuple(float(c) for c in acol[:4])
-        else:
-            acol = (0.2, 0.6, 1.0, 1.0)
-    except Exception:
-        attr, domain, style = "", "Point", "Heat"
-        density, seed, auto, rmin, rmax = 1.0, 0, True, 0.0, 1.0
-        length, scale, acol = 0.08, 0.02, (0.2, 0.6, 1.0, 1.0)
-    target = None
-    try:
-        target = node_builder.get_input(md, "Target")
-    except Exception:
-        pass
-    tw = ()
-    if target is not None:
-        mw = target.matrix_world
-        tw = tuple(mw[i][j] for i in range(4) for j in range(4))
-    return (
-        obj.as_pointer(), display, attr, domain, style, density, seed,
-        auto, rmin, rmax, length, scale, acol, n, tw, extra,
-    )
-
-
 def _refresh_markers(obj, md, positions, values, dtype, density, seed,
                      style, rmin, rmax, cap_key_n):
-    colors = gpu_color.values_to_colors(
-        values, dtype, style, vmin=rmin, vmax=rmax, seed=seed,
-    )
+    with perf.span("overlay.colors"):
+        colors = gpu_color.values_to_colors(
+            values, dtype, style, vmin=rmin, vmax=rmax, seed=seed,
+        )
     try:
         batch, shader, mode = _build_batch(positions, colors, prim='POINTS')
     except Exception:
@@ -277,15 +441,18 @@ def _refresh_arrows(obj, md, positions, values, dtype):
     }
 
 
-def _refresh_surface(obj, md, style, rmin, rmax, seed):
-    built = gpu_sample.build_surface_tris(
-        md, style=style, vmin=rmin, vmax=rmax, seed=seed,
-    )
-    if built is None:
+def _refresh_surface_from_sample(sample, style, rmin, rmax, seed):
+    """L2 only — colormap + batch from cached tri positions / corner values."""
+    positions = sample["positions"]
+    corner_values = sample["values"]
+    dtype = sample["dtype"]
+    n_tris = sample["n"]
+    if n_tris == 0 or positions is None:
         return {"batch": None, "n": 0, "prim": "TRIS", "empty": True}
-    positions, colors, dtype, n_tris = built
-    if n_tris == 0:
-        return {"batch": None, "n": 0, "prim": "TRIS", "empty": True}
+    with perf.span("overlay.colors"):
+        colors = gpu_color.values_to_colors(
+            corner_values, dtype, style, vmin=rmin, vmax=rmax, seed=seed,
+        )
     try:
         batch, shader, mode = _build_batch(positions, colors, prim='TRIS')
     except Exception:
@@ -307,63 +474,120 @@ def _refresh_surface(obj, md, style, rmin, rmax, seed):
     }
 
 
-def _refresh_viz(obj, md, display, cap=50000):
-    try:
-        density = float(node_builder.get_input(md, "Density") or 1.0)
-        seed = int(node_builder.get_input(md, "Seed") or 0)
-        style = node_builder.menu_input_name(md, "Style") or "Heat"
-        auto = bool(node_builder.get_input(md, "Auto Range"))
-        rmin = None if auto else float(
-            node_builder.get_input(md, "Range Min") or 0.0)
-        rmax = None if auto else float(
-            node_builder.get_input(md, "Range Max") or 1.0)
-    except Exception:
-        density, seed, style = 1.0, 0, "Heat"
-        rmin, rmax = None, None
+def _sample_surface(md, style, rmin, rmax, seed):
+    """L0 Surface — identity mesh tris + corner values (no colormap)."""
+    with perf.span("overlay.surface_build"):
+        # Identity pack; style/range/seed only matter at present (colormap).
+        built = gpu_sample.build_surface_tris(
+            md, style=style, vmin=rmin, vmax=rmax, seed=seed,
+        )
+    if built is None:
+        return None
+    positions, corner_values, dtype, n_tris = built
+    return {
+        "positions": positions,
+        "values": corner_values,
+        "dtype": dtype,
+        "n": n_tris,
+    }
 
-    if display == "Surface":
-        # Cache key from attr/domain/style; n from built tris
-        key = _viz_cache_key(obj, md, display, 0, extra=("surface", style))
-        cached = _caches.get(obj.as_pointer())
-        if cached and cached.get("key") == key and (
-                cached.get("batch") is not None or cached.get("empty")):
+
+def _refresh_viz(obj, md, display, cap=50000):
+    with perf.span(f"overlay.refresh.{display}"):
+        return _refresh_viz_impl(obj, md, display, cap=cap)
+
+
+def _refresh_viz_impl(obj, md, display, cap=50000):
+    sock = _socket_bundle(md)
+    style = sock["style"] or "Heat"
+    density = sock["density"]
+    seed = sock["seed"]
+    rmin = None if sock["auto"] else sock["rmin"]
+    rmax = None if sock["auto"] else sock["rmax"]
+
+    with perf.span("overlay.cache_key"):
+        fp = gpu_sample.watch_fingerprint(md)
+        extra = ("surface",) if display == "Surface" else ()
+        skey = _sample_key(obj, display, cap, sock, fp)
+        pkey = _present_key(display, sock, extra=extra)
+
+    ptr = obj.as_pointer()
+    cached = _caches.get(ptr)
+    if (cached is not None
+            and cached.get("sample_key") == skey
+            and cached.get("present_key") == pkey):
+        with perf.span("overlay.cache_hit"):
             return cached
-        entry = _refresh_surface(obj, md, style, rmin, rmax, seed)
-        # Rebuild key with real tri count
-        entry["key"] = _viz_cache_key(
-            obj, md, display, entry.get("n", 0), extra=("surface", style))
-        _caches[obj.as_pointer()] = entry
+
+    # Reuse L0 sample when only presentation changed (Range / Length / …).
+    sample = _sample_caches.get(ptr)
+    if sample is None or sample.get("sample_key") != skey:
+        with perf.span(f"overlay.sample_miss.{display}"):
+            if display == "Surface":
+                sample = _sample_surface(md, style, rmin, rmax, seed)
+            else:
+                with perf.span("overlay.sample"):
+                    result = gpu_sample.sample_visualizer_targets(
+                        md, density=density, seed=seed, cap=cap,
+                    )
+                if result is None:
+                    sample = {
+                        "sample_key": skey, "positions": None,
+                        "values": None, "dtype": None, "n": 0, "empty": True,
+                    }
+                else:
+                    positions, values, dtype = result
+                    sample = {
+                        "sample_key": skey,
+                        "positions": positions,
+                        "values": values,
+                        "dtype": dtype,
+                        "n": len(positions),
+                    }
+                    perf.note(f"last_sample_n.{display}", sample["n"])
+            if sample is not None:
+                sample["sample_key"] = skey
+                _sample_caches[ptr] = sample
+    else:
+        with perf.span("overlay.sample_hit"):
+            pass
+
+    if sample is None or sample.get("empty") or sample.get("n", 0) == 0:
+        entry = {
+            "batch": None, "n": 0, "empty": True,
+            "sample_key": skey, "present_key": pkey, "key": pkey,
+        }
+        _caches[ptr] = entry
         return entry
 
-    result = gpu_sample.sample_visualizer_targets(
-        md, density=density, seed=seed, cap=cap,
-    )
-    if result is None:
-        return None
-    positions, values, dtype = result
-    n = len(positions)
-    if n == 0:
-        return None
+    with perf.span(f"overlay.present.{display}"):
+        if display == "Surface":
+            entry = _refresh_surface_from_sample(
+                sample, style, rmin, rmax, seed,
+            )
+        elif display == "Arrows":
+            entry = _refresh_arrows(
+                obj, md, sample["positions"], sample["values"], sample["dtype"],
+            )
+        else:
+            entry = _refresh_markers(
+                obj, md, sample["positions"], sample["values"], sample["dtype"],
+                density, seed, style, rmin, rmax, sample["n"],
+            )
 
-    key = _viz_cache_key(obj, md, display, n, extra=(dtype,))
-    cached = _caches.get(obj.as_pointer())
-    if cached and cached.get("key") == key and (
-            cached.get("batch") is not None or cached.get("empty")):
-        return cached
-
-    if display == "Arrows":
-        entry = _refresh_arrows(obj, md, positions, values, dtype)
-    else:
-        entry = _refresh_markers(
-            obj, md, positions, values, dtype, density, seed,
-            style, rmin, rmax, n,
-        )
-    entry["key"] = key
-    _caches[obj.as_pointer()] = entry
+    entry["sample_key"] = skey
+    entry["present_key"] = pkey
+    entry["key"] = pkey  # back-compat
+    _caches[ptr] = entry
     return entry
 
 
 def draw_callback_view():
+    with perf.span("overlay.draw_callback"):
+        _draw_callback_view_impl()
+
+
+def _draw_callback_view_impl():
     context = bpy.context
     if context.region is None or context.region_data is None:
         return
@@ -371,53 +595,61 @@ def draw_callback_view():
     if not _scene_gpu_on(scene):
         return
 
-    _suppress_gn_carriers(scene)
-
     rows = _gpu_visualizers(scene)
     # Surfaces first (write depth), then points/lines (test only)
     surfaces = [(o, m, d) for o, m, d in rows if d == "Surface"]
     others = [(o, m, d) for o, m, d in rows if d != "Surface"]
 
     gpu.state.depth_test_set('LESS_EQUAL')
+    try:
+        gpu.state.face_culling_set('BACK')
+    except Exception:
+        pass
 
     gpu.state.depth_mask_set(True)
     for obj, md, display in surfaces:
         entry = _refresh_viz(obj, md, display)
         if entry is None or entry.get("batch") is None:
             continue
-        shader = entry["shader"]
-        shader.bind()
-        if entry.get("mode") == "uniform":
-            cols = entry.get("colors")
-            if cols is not None and len(cols):
-                mean = cols.mean(axis=0)
-                shader.uniform_float("color", tuple(float(c) for c in mean))
-        entry["batch"].draw(shader)
+        with perf.span("overlay.gpu_draw"):
+            shader = entry["shader"]
+            shader.bind()
+            if entry.get("mode") == "uniform":
+                cols = entry.get("colors")
+                if cols is not None and len(cols):
+                    mean = cols.mean(axis=0)
+                    shader.uniform_float("color", tuple(float(c) for c in mean))
+            entry["batch"].draw(shader)
 
+    try:
+        gpu.state.face_culling_set('NONE')
+    except Exception:
+        pass
     gpu.state.depth_mask_set(False)
     for obj, md, display in others:
         entry = _refresh_viz(obj, md, display)
         if entry is None or entry.get("batch") is None:
             continue
-        if entry.get("prim") == "POINTS":
-            try:
-                gpu.state.point_size_set(float(entry.get("point_size", 5.0)))
-            except Exception:
-                pass
-        shader = entry["shader"]
-        shader.bind()
-        if entry.get("mode") == "uniform":
-            if entry.get("uniform_color"):
-                shader.uniform_float("color", entry["uniform_color"])
-            else:
-                cols = entry.get("colors")
-                if cols is not None and len(cols):
-                    mean = cols.mean(axis=0)
-                    shader.uniform_float(
-                        "color", tuple(float(c) for c in mean))
+        with perf.span("overlay.gpu_draw"):
+            if entry.get("prim") == "POINTS":
+                try:
+                    gpu.state.point_size_set(float(entry.get("point_size", 5.0)))
+                except Exception:
+                    pass
+            shader = entry["shader"]
+            shader.bind()
+            if entry.get("mode") == "uniform":
+                if entry.get("uniform_color"):
+                    shader.uniform_float("color", entry["uniform_color"])
                 else:
-                    shader.uniform_float("color", (1.0, 0.5, 0.1, 1.0))
-        entry["batch"].draw(shader)
+                    cols = entry.get("colors")
+                    if cols is not None and len(cols):
+                        mean = cols.mean(axis=0)
+                        shader.uniform_float(
+                            "color", tuple(float(c) for c in mean))
+                    else:
+                        shader.uniform_float("color", (1.0, 0.5, 0.1, 1.0))
+            entry["batch"].draw(shader)
 
     gpu.state.depth_mask_set(True)
     gpu.state.depth_test_set('NONE')
@@ -458,7 +690,8 @@ def register():
             name="GPU Overlay",
             description=(
                 "Draw Markers / Surface / Arrows as unlit GPU ink in Solid "
-                "mode; hides GN carrier meshes. Tags stay on the text "
+                "mode; hides GN carrier meshes; Surface mutes watched mesh "
+                "solid draw (WIRE) to avoid z-fight. Tags stay on the text "
                 "prototype. Turn off to use the materials/GN path"
             ),
             default=True,
@@ -469,12 +702,28 @@ def register():
             draw_callback_view, (), 'WINDOW', 'POST_VIEW',
         )
 
+    def _boot_suppress():
+        try:
+            _suppress_gn_carriers(bpy.context.scene)
+        except Exception:
+            pass
+        return None
+
+    try:
+        bpy.app.timers.register(_boot_suppress, first_interval=0.1)
+    except Exception:
+        pass
+
 
 def unregister():
     global _handle
     if _handle is not None:
         bpy.types.SpaceView3D.draw_handler_remove(_handle, 'WINDOW')
         _handle = None
+    try:
+        restore_all_surface_mutes()
+    except Exception:
+        pass
     try:
         scene = bpy.context.scene
         if hasattr(scene, "attrviz_gpu_markers"):

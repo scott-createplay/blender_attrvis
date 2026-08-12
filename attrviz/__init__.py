@@ -179,6 +179,33 @@ def viz_modifier(obj):
     return None
 
 
+def _gpu_overlay_on(scene=None):
+    """True when GPU Overlay (default display path) is enabled."""
+    scene = scene or bpy.context.scene
+    return bool(getattr(scene, "attrviz_gpu_markers", True))
+
+
+def _assign_viz_engine(md, label, scene=None):
+    """Bind AttrViz engine tree to a Nodes modifier.
+
+    GPU Overlay on (default): share one ``ensure_viz_group()`` datablock —
+    config lives on modifier sockets, not a per-viz deep copy.
+
+    GPU Overlay off: keep an isolated ``.copy()`` so materials-path Heat
+    ColorRamp stays per-viz until ramp ownership is solved (Phase 2/4).
+
+    Phase 4: delete the copy branch once GPU registry / ramp policy lands.
+    """
+    engine = node_builder.ensure_viz_group(force=False)
+    if _gpu_overlay_on(scene):
+        md.node_group = engine
+        return engine
+    grp = engine.copy()
+    grp.name = f"AttrViz · {label}"
+    md.node_group = grp
+    return grp
+
+
 def _migrate_visualizer(obj):
     """Rebuild engine group + display material when version drifts."""
     md = viz_modifier(obj)
@@ -199,17 +226,18 @@ def _migrate_visualizer(obj):
         except Exception:
             pass
     old = md.node_group
-    grp = node_builder.ensure_viz_group(force=False).copy()
-    grp.name = f"AttrViz · {obj.name}"
-    md.node_group = grp
-    # Point Set Material nodes at the shared display material
-    mat = node_builder.ensure_viz_material(force=True)
-    for node in grp.nodes:
-        if node.bl_idname == "GeometryNodeSetMaterial":
-            try:
-                node.inputs["Material"].default_value = mat
-            except Exception:
-                pass
+    shared = _gpu_overlay_on()
+    grp = _assign_viz_engine(md, obj.name)
+    # Point Set Material nodes at the shared display material.
+    # Only safe to retarget nodes on an isolated (copied) tree.
+    if not shared:
+        mat = node_builder.ensure_viz_material(force=True)
+        for node in grp.nodes:
+            if node.bl_idname == "GeometryNodeSetMaterial":
+                try:
+                    node.inputs["Material"].default_value = mat
+                except Exception:
+                    pass
     for key, value in saved.items():
         if value is None and key in ("Target", "Scope"):
             continue
@@ -276,9 +304,11 @@ def add_visualizer(context, target=None, scope=None,
     coll.objects.link(obj)
     _ensure_display_only_flags(obj)
     md = obj.modifiers.new("AttrViz", 'NODES')
-    grp = node_builder.ensure_viz_group().copy()
-    grp.name = f"AttrViz · {label}"
-    md.node_group = grp
+    _assign_viz_engine(md, label, scene=context.scene)
+    # GPU Overlay is the default draw path — suppress GN before wiring
+    # Target so create does not evaluate the engine graph.
+    if display in ("Markers", "Surface", "Arrows"):
+        _suppress_new_viz_carrier(md, scene=context.scene)
     if target is not None:
         node_builder.set_input(md, "Target", target)
     if scope is not None:
@@ -292,6 +322,11 @@ def add_visualizer(context, target=None, scope=None,
     # Open this viz's layout panel (accordion closes others).
     try:
         obj.attrviz_ui_expand = True
+    except Exception:
+        pass
+    try:
+        gpu_overlay.suppress_gn_carriers(context.scene)
+        gpu_overlay.invalidate(obj)
     except Exception:
         pass
     return obj
@@ -424,6 +459,14 @@ def _target_attr_meta(md):
     dt = node_builder.intrinsic_dtype(attr)
     if dt is not None:
         return dt, domain
+    # Fast path: authored attribute on the original mesh (no depsgraph).
+    # Avoids evaluating the viz GN tree just to flip Attr Is Vector.
+    me = getattr(target, "data", None)
+    if me is not None and hasattr(me, "attributes"):
+        a = me.attributes.get(attr)
+        if a is not None:
+            return a.data_type, domain
+    # Fallback: evaluated geometry (modifier-generated attrs).
     by, _ = attributes_by_domain(target)
     for name, dtype in by.get(domain, []):
         if name == attr:
@@ -435,11 +478,22 @@ def _attr_available_on_domain(target, attr, domain):
     """True if attr is an intrinsic or authored attribute on domain."""
     if not attr or target is None or not domain:
         return False
+    if node_builder.is_intrinsic(attr) or attr == "position":
+        return True
+    # Fast path: original mesh (no GeometrySet eval — that is ~300ms on
+    # DistLook signs and ran from the Viz panel every redraw).
+    me = getattr(target, "data", None)
+    if me is not None and hasattr(me, "attributes"):
+        a = me.attributes.get(attr)
+        if a is not None:
+            ui = _BLENDER_TO_DOMAIN.get(a.domain)
+            if ui is None or ui == domain:
+                return True
+            return False
     by, _ = attributes_by_domain(target)
     names = {n for n, _t in by.get(domain, [])}
     if attr in names:
         return True
-    # lowercase position alias (engine accepts both)
     if attr == "position" and node_builder.POSITION_ATTR in names:
         return True
     return False
@@ -453,6 +507,22 @@ def _sync_attr_is_vector(md):
         cur = node_builder.get_input(md, "Attr Is Vector")
         if bool(cur) != bool(is_vec):
             node_builder.set_input(md, "Attr Is Vector", bool(is_vec))
+    except Exception:
+        pass
+
+
+def _suppress_new_viz_carrier(md, scene=None):
+    """Hide GN carrier immediately on create when GPU Overlay draws ink.
+
+    Must run before Target/Scope sockets are set — otherwise the first
+    depsgraph touch evaluates the full AttrViz engine on the watched mesh
+    (hundreds of ms … tens of seconds on heavy scenes).
+    """
+    if not _gpu_overlay_on(scene):
+        return
+    try:
+        if md.show_viewport:
+            md.show_viewport = False
     except Exception:
         pass
 
@@ -481,6 +551,13 @@ def _enum_set(socket, items):
         node_builder.set_input(md, socket, items[value])
         if socket == "Domain":
             _sync_attr_is_vector(md)
+        # Cache key includes Domain/Style/Display; next draw rebuilds on miss.
+        # Display also switches GN carrier visibility (never from draw handler).
+        if socket == "Display":
+            try:
+                gpu_overlay.suppress_gn_carriers(bpy.context.scene)
+            except Exception:
+                pass
         self.update_tag()
     return setter
 
@@ -534,6 +611,10 @@ class ATTRVIZ_OT_remove(bpy.types.Operator):
         obj = bpy.data.objects.get(self.name)
         if obj is not None and is_visualizer(obj):
             bpy.data.objects.remove(obj, do_unlink=True)
+        try:
+            gpu_overlay.suppress_gn_carriers(context.scene)
+        except Exception:
+            pass
         return {'FINISHED'}
 
 
@@ -738,7 +819,6 @@ def _draw_viz_body(body, obj, md, attr_name):
     # Domain localizes; Type / Color follow.
     body.prop(obj, "attrviz_domain", text="Domain", expand=True)
     _draw_socket(body, md, "Attribute")
-    _sync_attr_is_vector(md)
     dtype, _ = _target_attr_meta(md)
     try:
         target = node_builder.get_input(md, "Target")
@@ -786,12 +866,16 @@ def _draw_viz_body(body, obj, md, attr_name):
             body.label(text="Stable hash color per element id")
             _draw_socket(body, md, "Seed")
         if style == "Heat":
-            ramp = next(
-                (n for n in md.node_group.nodes
-                 if n.bl_idname == 'ShaderNodeValToRGB'), None)
-            if ramp is not None:
-                body.template_color_ramp(ramp, "color_ramp",
-                                         expand=False)
+            # Shared engine (GPU on): do not edit in-group ColorRamp —
+            # one ramp would apply to every viz. GPU Heat uses Range +
+            # Python map in gpu_color. Materials path keeps per-viz ramp.
+            if not _gpu_overlay_on(bpy.context.scene):
+                ramp = next(
+                    (n for n in md.node_group.nodes
+                     if n.bl_idname == 'ShaderNodeValToRGB'), None)
+                if ramp is not None:
+                    body.template_color_ramp(ramp, "color_ramp",
+                                             expand=False)
             col = body.column(align=True)
             _draw_socket(col, md, "Auto Range")
             sub = col.column(align=True)
@@ -873,14 +957,25 @@ def _set_enabled(self, value):
             _ensure_viz_display_shading(bpy.context)
         except Exception:
             pass
+    # Do NOT invalidate GPU caches here — hide_viewport already skips draw.
+    # Re-enable must reuse Surface L0 caches (hundreds of ms to rebuild).
     try:
-        gpu_overlay.invalidate_all()
+        gpu_overlay.suppress_gn_carriers(bpy.context.scene)
+        screen = getattr(bpy.context, "screen", None)
+        if screen is not None:
+            for area in screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
     except Exception:
         pass
 
 
 def _sync_vizcol_active(scene, depsgraph):
     """Workbench Attribute shading needs active Color Attribute on eval mesh."""
+    try:
+        gpu_overlay.sync_surface_target_mute(scene)
+    except Exception:
+        pass
     name = node_builder.VIZCOL_ATTR
     for obj in visualizers(scene):
         if obj.hide_viewport:

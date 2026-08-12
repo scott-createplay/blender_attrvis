@@ -12,6 +12,18 @@ import numpy as np
 
 from . import node_builder
 
+try:
+    from . import perf
+except Exception:  # pragma: no cover
+    perf = None
+
+
+def _span(name):
+    if perf is None:
+        from contextlib import nullcontext
+        return nullcontext()
+    return perf.span(name)
+
 SampleResult = Tuple[np.ndarray, np.ndarray, str]
 
 
@@ -161,38 +173,55 @@ def sample_evaluated(
     world_space: bool = True,
 ) -> Optional[SampleResult]:
     """Sample one mesh object. domain_ui is Point/Edge/Face/Corner."""
+    with _span("sample.evaluated"):
+        return _sample_evaluated_impl(
+            obj, attr, domain_ui, world_space=world_space,
+        )
+
+
+def _sample_evaluated_impl(
+    obj: bpy.types.Object,
+    attr: str,
+    domain_ui: str = "Point",
+    *,
+    world_space: bool = True,
+) -> Optional[SampleResult]:
     domain_ui = domain_ui if domain_ui in node_builder.DOMAINS else "Point"
     blender_dom = node_builder.DOMAIN_TO_BLENDER[domain_ui]
 
-    ev, me = _evaluated_mesh(obj)
+    with _span("sample.depsgraph_mesh"):
+        ev, me = _evaluated_mesh(obj)
     if me is None:
         return None
 
-    if domain_ui == "Point":
-        positions = _point_positions(me)
-    elif domain_ui == "Face":
-        positions = _face_centers(me)
-    elif domain_ui == "Edge":
-        positions = _edge_centers(me)
-    else:
-        positions = _corner_positions(me)
+    with _span(f"sample.positions.{domain_ui}"):
+        if domain_ui == "Point":
+            positions = _point_positions(me)
+        elif domain_ui == "Face":
+            positions = _face_centers(me)
+        elif domain_ui == "Edge":
+            positions = _edge_centers(me)
+        else:
+            positions = _corner_positions(me)
 
-    if node_builder.is_intrinsic(attr):
-        values, dtype = _read_intrinsic(me, attr, domain_ui, cos=positions)
-    else:
-        values, dtype = _read_attr(me, attr, blender_dom, len(positions))
+    with _span("sample.read_attr"):
+        if node_builder.is_intrinsic(attr):
+            values, dtype = _read_intrinsic(me, attr, domain_ui, cos=positions)
+        else:
+            values, dtype = _read_attr(me, attr, blender_dom, len(positions))
     if values is None:
         return None
 
     # Transform normals to world when sampling Normal intrinsic
     if world_space:
-        if attr == node_builder.NORMAL_ATTR and dtype == 'FLOAT_VECTOR':
-            nmat = _normal_matrix(ev.matrix_world)
-            out = np.empty_like(values, dtype=np.float32)
-            for i in range(len(values)):
-                out[i] = nmat @ mathutils.Vector(values[i])
-            values = out
-        positions = _to_world(positions, ev.matrix_world)
+        with _span("sample.to_world"):
+            if attr == node_builder.NORMAL_ATTR and dtype == 'FLOAT_VECTOR':
+                nmat = _normal_matrix(ev.matrix_world)
+                out = np.empty_like(values, dtype=np.float32)
+                for i in range(len(values)):
+                    out[i] = nmat @ mathutils.Vector(values[i])
+                values = out
+            positions = _to_world(positions, ev.matrix_world)
 
     return positions, values, dtype
 
@@ -223,6 +252,32 @@ def iter_watch_meshes(target, scope) -> List[bpy.types.Object]:
     return out
 
 
+def watch_fingerprint(md) -> tuple:
+    """Cheap Target∪Scope topology + transform signature (no attr read).
+
+    Used by the GPU overlay to decide cache hits *before* sampling.
+    """
+    try:
+        target = node_builder.get_input(md, "Target")
+        scope = node_builder.get_input(md, "Scope")
+    except Exception:
+        return ()
+    parts = []
+    for obj in iter_watch_meshes(target, scope):
+        me = getattr(obj, "data", None)
+        mw = obj.matrix_world
+        tw = tuple(mw[i][j] for i in range(4) for j in range(4))
+        nv = len(me.vertices) if me is not None else 0
+        ne = len(me.edges) if me is not None else 0
+        np_ = len(me.polygons) if me is not None else 0
+        parts.append((
+            obj.as_pointer(),
+            me.as_pointer() if me is not None else 0,
+            nv, ne, np_, tw,
+        ))
+    return tuple(parts)
+
+
 def sample_visualizer_targets(
     md,
     *,
@@ -236,6 +291,20 @@ def sample_visualizer_targets(
     Concatenates all watched meshes. Density uses a stable hash cull
     (same spirit as GN Random Value < Density).
     """
+    with _span("sample.visualizer_targets"):
+        return _sample_visualizer_targets_impl(
+            md, world_space=world_space, density=density, seed=seed, cap=cap,
+        )
+
+
+def _sample_visualizer_targets_impl(
+    md,
+    *,
+    world_space: bool = True,
+    density: float = 1.0,
+    seed: int = 0,
+    cap: int = 50000,
+) -> Optional[SampleResult]:
     try:
         target = node_builder.get_input(md, "Target")
         scope = node_builder.get_input(md, "Scope")
@@ -249,6 +318,8 @@ def sample_visualizer_targets(
     meshes = iter_watch_meshes(target, scope)
     if not meshes:
         return None
+    if perf is not None:
+        perf.note("watch_mesh_count", len(meshes))
 
     pos_parts = []
     val_parts = []
@@ -265,35 +336,36 @@ def sample_visualizer_targets(
     if not pos_parts or dtype is None:
         return None
 
-    positions = np.concatenate(pos_parts, axis=0)
-    # values may be 1D or 2D
-    if val_parts[0].ndim == 1:
-        values = np.concatenate(val_parts, axis=0)
-    else:
-        values = np.concatenate(val_parts, axis=0)
+    with _span("sample.concat_density_cap"):
+        positions = np.concatenate(pos_parts, axis=0)
+        # values may be 1D or 2D
+        if val_parts[0].ndim == 1:
+            values = np.concatenate(val_parts, axis=0)
+        else:
+            values = np.concatenate(val_parts, axis=0)
 
-    n = len(positions)
-    if n == 0:
-        return positions, values, dtype
-
-    # Density cull (stable)
-    density = float(max(0.0, min(1.0, density)))
-    if density < 1.0 - 1e-6:
-        keep = np.empty(n, dtype=bool)
-        for i in range(n):
-            # xorshift-ish from index+seed
-            x = (i * 747796405 + int(seed) * 2891336453) & 0xFFFFFFFF
-            x = ((x >> ((x >> 28) + 4)) ^ x) * 277803737
-            x = (x ^ (x >> 22)) & 0xFFFFFFFF
-            keep[i] = (x / 0xFFFFFFFF) < density
-        positions = positions[keep]
-        values = values[keep]
         n = len(positions)
+        if n == 0:
+            return positions, values, dtype
 
-    if n > cap > 0:
-        step = int(np.ceil(n / cap))
-        positions = positions[::step]
-        values = values[::step]
+        # Density cull (stable)
+        density = float(max(0.0, min(1.0, density)))
+        if density < 1.0 - 1e-6:
+            keep = np.empty(n, dtype=bool)
+            for i in range(n):
+                # xorshift-ish from index+seed
+                x = (i * 747796405 + int(seed) * 2891336453) & 0xFFFFFFFF
+                x = ((x >> ((x >> 28) + 4)) ^ x) * 277803737
+                x = (x ^ (x >> 22)) & 0xFFFFFFFF
+                keep[i] = (x / 0xFFFFFFFF) < density
+            positions = positions[keep]
+            values = values[keep]
+            n = len(positions)
+
+        if n > cap > 0:
+            step = int(np.ceil(n / cap))
+            positions = positions[::step]
+            values = values[::step]
 
     return positions, values, dtype
 
@@ -320,14 +392,37 @@ def build_surface_tris(
     vmin=None,
     vmax=None,
     seed: int = 0,
-    inflate: float = 0.002,
-    face_cap: int = 200000,
 ) -> Optional[Tuple[np.ndarray, np.ndarray, str, int]]:
-    """Build world-space TRI vertex arrays for GPU Surface ink.
+    """Identity Surface pack: evaluated mesh loop-tris + domain corner values.
 
-    Returns (positions Mx3, colors Mx4, dtype, n_tris) where M = 3 * n_tris,
-    or None if unavailable. Edge domain is weakly supported (skipped).
+    Returns (positions Mx3, corner_values, dtype, n_tris) where M = 3 * n_tris.
+    ``corner_values`` are raw attr samples at each tri corner (colormap in overlay).
+    Edge domain is weakly supported (skipped).
+
+    Positions are an **identity** copy of the evaluated mesh triangulation in
+    world space (no inflate, face stride, or outlier cull). Only false-color
+    changes at present time; topology matches ``len(me.loop_triangles)``.
     """
+    with _span("sample.build_surface_tris"):
+        return _build_surface_tris_impl(
+            md,
+            style=style,
+            vmin=vmin,
+            vmax=vmax,
+            seed=seed,
+        )
+
+
+def _build_surface_tris_impl(
+    md,
+    *,
+    style: str = "Heat",
+    vmin=None,
+    vmax=None,
+    seed: int = 0,
+) -> Optional[Tuple[np.ndarray, np.ndarray, str, int]]:
+    # style/vmin/vmax/seed unused for packing; kept for API compat with overlay.
+    _ = (style, vmin, vmax, seed)
     try:
         target = node_builder.get_input(md, "Target")
         scope = node_builder.get_input(md, "Scope")
@@ -356,7 +451,8 @@ def build_surface_tris(
         except Exception:
             pass
         tris = me.loop_triangles
-        if not tris:
+        n_tris = len(tris)
+        if n_tris == 0:
             continue
 
         # Sample domain values on this mesh
@@ -365,58 +461,51 @@ def build_surface_tris(
             continue
         _local_pos, values, dt = result
         dtype = dt
-        colors = _domain_element_colors(
-            values, dt, style, vmin=vmin, vmax=vmax, seed=seed,
-        )
+        # Domain values — expanded to corners below; colormap applied in overlay
+        # so Range/Style scrub can recolor without re-packing tris.
+        values = np.asarray(values)
 
-        # Local positions + normals for inflate
         n_verts = len(me.vertices)
         cos = np.empty(n_verts * 3, dtype=np.float32)
         me.vertices.foreach_get("co", cos)
         cos = cos.reshape(-1, 3)
-        nrms = np.empty(n_verts * 3, dtype=np.float32)
-        me.vertices.foreach_get("normal", nrms)
-        nrms = nrms.reshape(-1, 3)
 
-        # Cap faces if huge
-        tri_list = list(tris)
-        if len(tri_list) > face_cap:
-            step = int(np.ceil(len(tri_list) / face_cap))
-            tri_list = tri_list[::step]
+        with _span("sample.surface_tri_pack"):
+            # Vectorized identity expand: all loop-tris, no mutate/filter.
+            vert_ids = np.empty((n_tris, 3), dtype=np.int32)
+            poly_ids = np.empty(n_tris, dtype=np.int32)
+            loop_ids = np.empty((n_tris, 3), dtype=np.int32)
+            for i, tri in enumerate(tris):
+                vert_ids[i] = tri.vertices
+                poly_ids[i] = tri.polygon_index
+                loop_ids[i] = tri.loops
 
-        m = len(tri_list) * 3
-        out_pos = np.empty((m, 3), dtype=np.float32)
-        out_col = np.empty((m, 4), dtype=np.float32)
-        k = 0
-        for tri in tri_list:
-            verts = tri.vertices  # 3 vert indices
-            poly_i = tri.polygon_index
-            loops = tri.loops
-            for j in range(3):
-                vi = verts[j]
-                p = cos[vi] + nrms[vi] * float(inflate)
-                out_pos[k] = p
-                if domain_ui == "Point":
-                    out_col[k] = colors[vi]
-                elif domain_ui == "Face":
-                    out_col[k] = colors[poly_i]
-                elif domain_ui == "Corner":
-                    out_col[k] = colors[loops[j]]
-                else:
-                    out_col[k] = colors[0] if len(colors) else (0.7, 0.7, 0.7, 1.0)
-                k += 1
+            m = n_tris * 3
+            flat_vi = vert_ids.reshape(-1)
+            out_pos = cos[flat_vi]
 
-        # to world
-        out_pos = _to_world(out_pos, ev.matrix_world)
+            if domain_ui == "Point":
+                out_val = values[flat_vi]
+            elif domain_ui == "Face":
+                out_val = values[poly_ids].repeat(3, axis=0)
+            elif domain_ui == "Corner":
+                out_val = values[loop_ids.reshape(-1)]
+            else:
+                out_val = np.broadcast_to(
+                    values[0], (m,) + (() if values.ndim == 1 else values.shape[1:]),
+                ).copy()
+
+            out_pos = _to_world(out_pos, ev.matrix_world)
+
         pos_chunks.append(out_pos)
-        col_chunks.append(out_col)
-        n_tris_total += len(tri_list)
+        col_chunks.append(out_val)
+        n_tris_total += n_tris
 
     if not pos_chunks or dtype is None:
         return None
     positions = np.concatenate(pos_chunks, axis=0)
-    colors = np.concatenate(col_chunks, axis=0)
-    return positions, colors, dtype, n_tris_total
+    corner_values = np.concatenate(col_chunks, axis=0)
+    return positions, corner_values, dtype, n_tris_total
 
 
 def buffer_stats(result: SampleResult) -> dict[str, Any]:
