@@ -668,7 +668,6 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        # Keep existing viz on the current engine + display material.
         migrate_all_visualizers(context.scene)
         vizzes = visualizers(context.scene)
         if not vizzes:
@@ -677,7 +676,6 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
             return
         space = context.space_data
         gpu_on = bool(getattr(context.scene, "attrviz_gpu_markers", True))
-        # Solid Attribute cannot color GN-only geometry (Blender limit).
         if not _viz_display_shading_ok(space):
             _ensure_viz_display_shading(context)
         row = layout.row(align=True)
@@ -690,20 +688,17 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
             row.operator("attrviz.use_viz_display_shading", text="",
                          icon='FILE_REFRESH')
 
-        # Flat header rows only (layout.row). Any column()/box()/split()
-        # inside the loop nests the *next* header under the previous body
-        # in Blender's UILayout — including intrinsics. Bodies draw after
-        # all headers; accordion keeps a single expanded body.
-        # Heal older sessions where every viz was expanded by default.
+        # List only — no settings body here. Nested column/box/split in the
+        # same draw() as later rows is what nests headers in UILayout.
+        # Settings live in ATTRVIZ_PT_settings (separate layout tree).
         opened = [o for o in vizzes if o.attrviz_ui_expand]
         if len(opened) > 1:
             for o in opened[:-1]:
                 o.attrviz_ui_expand = False
 
-        expanded_obj = None
-        expanded_md = None
-        expanded_attr = ""
-        for obj in vizzes:
+        for i, obj in enumerate(vizzes):
+            if i:
+                layout.separator()
             md = viz_modifier(obj)
             attr_name = ""
             domain = ""
@@ -730,15 +725,39 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
             op = row.operator(ATTRVIZ_OT_remove.bl_idname, text="",
                               icon='X')
             op.name = obj.name
-            if obj.attrviz_ui_expand and md is not None:
-                expanded_obj = obj
-                expanded_md = md
-                expanded_attr = attr_name
 
-        if expanded_obj is not None:
-            layout.separator()
-            body = layout.column()
-            _draw_viz_body(body, expanded_obj, expanded_md, expanded_attr)
+
+class ATTRVIZ_PT_settings(bpy.types.Panel):
+    """Settings for the expanded visualizer — own layout, cannot nest the list."""
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = VIZ_PANEL_CATEGORY
+    bl_label = "Settings"
+    bl_parent_id = "ATTRVIZ_PT_panel"
+    bl_options = set()
+
+    @classmethod
+    def poll(cls, context):
+        scene = context.scene
+        if scene is None:
+            return False
+        return any(o.attrviz_ui_expand for o in visualizers(scene))
+
+    def draw(self, context):
+        layout = self.layout
+        for obj in visualizers(context.scene):
+            if not obj.attrviz_ui_expand:
+                continue
+            md = viz_modifier(obj)
+            if md is None:
+                layout.label(text="Missing AttrViz modifier", icon='ERROR')
+                return
+            try:
+                attr_name = node_builder.get_input(md, "Attribute") or ""
+            except Exception:
+                attr_name = ""
+            _draw_viz_body(layout, obj, md, attr_name)
+            return
 
 
 def _draw_viz_body(body, obj, md, attr_name):
@@ -842,6 +861,7 @@ CLASSES = (
     ATTRVIZ_MT_domain_corner,
     ATTRVIZ_MT_visualize,
     ATTRVIZ_PT_panel,
+    ATTRVIZ_PT_settings,
 )
 
 
