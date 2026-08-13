@@ -17,9 +17,12 @@ import bpy
 from . import node_builder
 from . import tags_draw
 from . import gpu_overlay
+from . import gpu_sample
 
 VIZ_COLLECTION = "Visualizers"
+WATCH_COLLECTION = "attrvis"
 VIZ_PANEL_CATEGORY = "Viz"
+_WATCH_NAME_CAP = 8
 VECTORISH = {'FLOAT_VECTOR', 'FLOAT2'}
 CATEGORICAL = {'INT', 'BOOLEAN', 'INT8', 'INT16_2D', 'INT32_2D'}
 
@@ -39,6 +42,88 @@ def _ensure_collection(context):
     if coll.name not in context.scene.collection.children:
         context.scene.collection.children.link(coll)
     return coll
+
+
+def _ensure_watch_collection(context):
+    """Scene-level watch set. Distinct from the Visualizers registry."""
+    coll = bpy.data.collections.get(WATCH_COLLECTION)
+    if coll is None:
+        coll = bpy.data.collections.new(WATCH_COLLECTION)
+    if coll.name not in context.scene.collection.children:
+        context.scene.collection.children.link(coll)
+    return coll
+
+
+def _watch_candidates(context):
+    """Selected ∪ active MESH objects, excluding viz carriers."""
+    seen = set()
+    out = []
+    objs = list(getattr(context, "selected_objects", None) or [])
+    active = getattr(context, "active_object", None)
+    if active is not None and active not in objs:
+        objs.append(active)
+    for obj in objs:
+        if obj is None or obj.type != 'MESH' or is_visualizer(obj):
+            continue
+        key = obj.as_pointer()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(obj)
+    return out
+
+
+def _invalidate_watch():
+    try:
+        gpu_overlay.invalidate_all()
+    except Exception:
+        pass
+    try:
+        screen = getattr(bpy.context, "screen", None)
+        if screen is not None:
+            for area in screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+    except Exception:
+        pass
+
+
+def _link_to_watch(context, objects):
+    coll = _ensure_watch_collection(context)
+    for obj in objects:
+        if obj is None:
+            continue
+        if coll not in obj.users_collection:
+            coll.objects.link(obj)
+    _invalidate_watch()
+    return coll
+
+
+def _unlink_from_watch(context, objects):
+    coll = bpy.data.collections.get(WATCH_COLLECTION)
+    if coll is None:
+        return None
+    scene_coll = context.scene.collection
+    for obj in objects:
+        if obj is None or coll not in obj.users_collection:
+            continue
+        # Unlink from attrvis only — never delete. Keep a scene link if
+        # attrvis was the last collection so the object does not vanish.
+        if (len(obj.users_collection) == 1
+                and scene_coll not in obj.users_collection):
+            scene_coll.objects.link(obj)
+        coll.objects.unlink(obj)
+    _invalidate_watch()
+    return coll
+
+
+def add_visualizer_from_selection(context, **kwargs):
+    """GUI add-viz: link selection into attrvis, Scope = that collection."""
+    objs = _watch_candidates(context)
+    coll = _link_to_watch(context, objs)
+    kwargs.setdefault("target", None)
+    kwargs.setdefault("scope", coll)
+    return add_visualizer(context, **kwargs)
 
 
 def _prepare_viz_mesh(me):
@@ -592,11 +677,52 @@ class ATTRVIZ_OT_add(bpy.types.Operator):
 
     def execute(self, context):
         first = len(visualizers(context.scene)) == 0
-        add_visualizer(context, target=context.active_object,
-                       attribute=self.attribute, domain=self.domain,
-                       style=self.style, display=self.display)
+        add_visualizer_from_selection(
+            context, attribute=self.attribute, domain=self.domain,
+            style=self.style, display=self.display)
         if first:
             _reveal_viz_panel(context)
+        return {'FINISHED'}
+
+
+class ATTRVIZ_OT_watch_add(bpy.types.Operator):
+    bl_idname = "attrviz.watch_add"
+    bl_label = "Add objects"
+    bl_description = "Add selected objects to the attrvis watch collection"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_watch_candidates(context))
+
+    def execute(self, context):
+        objs = _watch_candidates(context)
+        _link_to_watch(context, objs)
+        self.report({'INFO'}, f"Added {len(objs)} to attrvis")
+        return {'FINISHED'}
+
+
+class ATTRVIZ_OT_watch_remove(bpy.types.Operator):
+    bl_idname = "attrviz.watch_remove"
+    bl_label = "Remove objects"
+    bl_description = (
+        "Remove selected objects from attrvis (does not delete them)")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        coll = bpy.data.collections.get(WATCH_COLLECTION)
+        if coll is None:
+            return False
+        return any(coll in o.users_collection
+                   for o in _watch_candidates(context))
+
+    def execute(self, context):
+        coll = bpy.data.collections.get(WATCH_COLLECTION)
+        objs = [o for o in _watch_candidates(context)
+                if coll is not None and coll in o.users_collection]
+        _unlink_from_watch(context, objs)
+        self.report({'INFO'}, f"Removed {len(objs)} from attrvis")
         return {'FINISHED'}
 
 
@@ -705,6 +831,11 @@ class ATTRVIZ_MT_visualize(bpy.types.Menu):
     bl_idname = "ATTRVIZ_MT_visualize"
     bl_label = "Visualize Attribute"
 
+    @classmethod
+    def poll(cls, context):
+        return (context.active_object is not None
+                and not is_visualizer(context.active_object))
+
     def draw(self, context):
         layout = self.layout
         by, _ = attributes_by_domain(context.active_object)
@@ -723,12 +854,50 @@ class ATTRVIZ_MT_visualize(bpy.types.Menu):
                 layout.menu(menu_id, text=domain)
 
 
+class ATTRVIZ_MT_edit(bpy.types.Menu):
+    bl_idname = "ATTRVIZ_MT_edit"
+    bl_label = "Edit"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.operator(ATTRVIZ_OT_watch_add.bl_idname, icon='ADD')
+        layout.operator(ATTRVIZ_OT_watch_remove.bl_idname, icon='REMOVE')
+
+
+class ATTRVIZ_MT_root(bpy.types.Menu):
+    bl_idname = "ATTRVIZ_MT_root"
+    bl_label = "AttrViz"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.menu(ATTRVIZ_MT_visualize.bl_idname, icon='HIDE_OFF')
+        layout.menu(ATTRVIZ_MT_edit.bl_idname, icon='OUTLINER_COLLECTION')
+
+
 def _context_menu(self, context):
-    if context.active_object is not None \
-            and not is_visualizer(context.active_object):
-        self.layout.separator()
-        self.layout.menu(ATTRVIZ_MT_visualize.bl_idname,
-                         icon='HIDE_OFF')
+    self.layout.separator()
+    self.layout.menu(ATTRVIZ_MT_root.bl_idname, icon='HIDE_OFF')
+
+
+def _draw_watch_readout(layout):
+    """Scene-level attrvis coverage — root layout only, not per-viz body."""
+    coll = bpy.data.collections.get(WATCH_COLLECTION)
+    if coll is None:
+        layout.label(text="none — AttrViz → Edit → Add objects")
+        return
+    meshes = gpu_sample.iter_watch_meshes(None, coll)
+    if not meshes:
+        layout.label(text="none — AttrViz → Edit → Add objects")
+        return
+    names = [o.name for o in meshes]
+    n = len(names)
+    noun = "mesh" if n == 1 else "meshes"
+    if n <= _WATCH_NAME_CAP:
+        detail = ", ".join(names)
+    else:
+        shown = ", ".join(names[:_WATCH_NAME_CAP])
+        detail = f"{shown}  +{n - _WATCH_NAME_CAP} more"
+    layout.label(text=f"attrvis    {n} {noun} · {detail}")
 
 
 def _draw_socket(layout, md, name, text=None):
@@ -753,7 +922,8 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
         migrate_all_visualizers(scene)
         vizzes = visualizers(scene)
         if not vizzes:
-            layout.label(text="RMB → Visualize Attribute → Domain")
+            _draw_watch_readout(layout)
+            layout.label(text="RMB → AttrViz → Visualize Attribute")
             layout.label(text="Viewport: Material Preview (emission viz)")
             return
 
@@ -770,6 +940,8 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
             row.label(text="Material Preview", icon='SHADING_RENDERED')
             row.operator("attrviz.use_viz_display_shading", text="",
                          icon='FILE_REFRESH')
+
+        _draw_watch_readout(layout)
 
         # Heal sessions where every viz was left expanded.
         opened = [o for o in vizzes if o.attrviz_ui_expand]
@@ -891,7 +1063,7 @@ def _draw_viz_body(body, obj, md, attr_name):
         _draw_socket(col, md, "Density")
     elif display == "Tags":
         body.label(
-            text="BLF tags: shared sampler, capped count; atlas later",
+            text="BLF labels · Cap spreads across the view",
             icon='INFO')
         col = body.column(align=True)
         _draw_socket(col, md, "Tag Color", text="Color")
@@ -908,6 +1080,8 @@ def _draw_viz_body(body, obj, md, attr_name):
 
 CLASSES = (
     ATTRVIZ_OT_add,
+    ATTRVIZ_OT_watch_add,
+    ATTRVIZ_OT_watch_remove,
     ATTRVIZ_OT_remove,
     ATTRVIZ_OT_use_viz_display_shading,
     ATTRVIZ_MT_domain_point,
@@ -915,6 +1089,8 @@ CLASSES = (
     ATTRVIZ_MT_domain_face,
     ATTRVIZ_MT_domain_corner,
     ATTRVIZ_MT_visualize,
+    ATTRVIZ_MT_edit,
+    ATTRVIZ_MT_root,
     ATTRVIZ_PT_panel,
 )
 

@@ -17,19 +17,18 @@ If Python draw-handler depth/color cannot meet the bar, **escalate** mid-task to
 | Piece | State |
 |-------|--------|
 | AttrViz materials path (emission + `vizcol`) | Working fallback; GPU Overlay covers Markers/Surface/Arrows |
-| Tags (BLF) | Shared sampler + cap; Size is int px (0.5.3) |
+| Tags (BLF text) | **7c Cap + cards in 0.5.9**; glyph atlas pulled (UV/layout wrong). Text = `blf.draw` until a working atlas. GUI confirm open |
 | Standalone probe | Gate A met |
-| Real AttrViz GPU overlay | Markers + Surface + 4-sided Arrows; Tags Steps 1–2 |
+| Real AttrViz GPU overlay | Markers + Surface + 4-sided Arrows; Tags 7c (POST_PIXEL) |
 | **Viz N-panel layout** | **Fixed** — `layout.panel_prop` per viz (collapsible; header = Enabled + `attr · domain · type` + remove) |
+| **Watch collection (`attrvis`)** | **0.5.10** — scene-level Scope; RMB AttrViz → Visualize Attribute / Edit → Add·Remove objects; panel coverage readout |
 
-**Current AttrViz version:** `0.5.8`.
+**Current AttrViz version:** `0.5.10`.
 
 **Next (ordered):**
 
-1. **GUI visual gate** — Arrows instanced path on cube `flow` (0.5.8 synced); confirm cones + Length scrub.  
-2. Scoping UX backlog — [`backlog.md`](backlog.md).  
-3. Strangler Phase 2 / DistLook leftovers.  
-4. Surface P4 screenshot archive if not already saved.
+1. GUI confirm watch collection (RMB AttrViz tree, multi-select add, coverage readout) + Tags (BLF, spread Cap, Cap 0) + Arrows instancing + Surface identity if not user-signed.  
+2. Deferred: attribute discovery / DistLook / strangler Phase 2 — [`backlog.md`](backlog.md).  
 
 ---
 
@@ -51,9 +50,35 @@ Code: `attrviz/__init__.py` — `ATTRVIZ_PT_panel.draw`. Abandoned: `ATTRVIZ_UL_
 
 Install path still ≠ repo — rsync/cp after edits; disable/enable addon or restart Blender.
 
+---
+
+## Watch collection (`attrvis`) — resolved (0.5.10)
+
+**Product:** AttrViz visualizes one scene collection named `attrvis`. Membership **is** the scope. Objects stay in their other collections (Blender multi-membership). Not attribute-discovery (“all meshes that have `flow`”). Distinct from `Visualizers` (viz-object registry).
+
+**RMB**
+
+```
+AttrViz
+  Visualize Attribute → Point / Face / …   (create a viz; selection → attrvis)
+  Edit
+    Add objects                             (link selection into attrvis)
+    Remove objects                          (unlink from attrvis; do not delete)
+```
+
+**Panel:** coverage readout on the **root** layout (`attrvis    N meshes · names…`, cap 8 + `+N more`). No Target/Scope pickers in `_draw_viz_body`. `panel_prop` stays root-only.
+
+**GUI path:** `add_visualizer_from_selection` links selected ∪ active MESH (skip viz carriers), sets `Scope = attrvis`, `Target` unset. Multi-select adds all of them.
+
+**API path unchanged:** `add_visualizer(target=, scope=)` for tests and city `--viz` (per-viz collection override).
+
+**Not this pass:** collection picker, per-viz Scope in the panel, attribute discovery, strangler.
+
+Code: `attrviz/__init__.py` (`WATCH_COLLECTION`, `_link_to_watch` / `_unlink_from_watch`, `ATTRVIZ_MT_root`). Tests: `tests/test_gpu_sample.py`.
+
 ### Out of scope leftovers (Phase 7)
 
-- Tags glyph atlas, DistLook live smoke, probe thinning, README roadmap — after panel (done).
+- DistLook live smoke, probe thinning, README roadmap — as capacity allows. Tags atlas landed in **Phase 7c** (GUI confirm open).
 
 ---
 
@@ -467,6 +492,117 @@ Shader transforms unit cone (base at origin, tip +Z) into world via orthonormal 
 
 ---
 
+#### Phase 7c — Tags Cap policy + draw perf (DONE in code, GUI confirm open)
+
+**Onboard:** [`AGENT_ONBOARD_TAGS_PERF.md`](AGENT_ONBOARD_TAGS_PERF.md).  
+**Reuse:** Arrows `GPUShaderCreateInfo` + `draw_instanced` in `gpu_overlay.py`.
+
+##### Context
+
+**Display role:** Tags = construct label carriers (not mesh reference). `POST_PIXEL` cards + atlas text.
+
+**Call chain (0.5.9):**
+
+```text
+tags_draw.draw_callback_px
+  → _labels_for_md
+       → cached sample_evaluated(Target∪Scope) (+ Normal if Facing)
+       → vectorized facing: drop if dot(normalize(N), normalize(cam - p)) <= 0.05
+       → vectorized project + screen cull
+       → screen_bin_select: one label per cell, ≤ Tag Cap, spread in view
+  → unit-quad cards × draw_instanced (soup `_draw_cards_batched` fallback)
+  → glyph atlas textured quads (BLF fallback on miss / no OffScreen)
+```
+
+**Primary file:** `attrviz/tags_draw.py`  
+**Also:** `gpu_sample.py` (sample / watch meshes), `gpu_overlay.py` (instancing pattern), `__init__.py` (Tag Cap / Size / Color / Facing Cull sockets).
+
+**Already fixed (keep):**
+- Tag Cap `0` → no labels (`_int_socket`; no `or 10000` / `max(1,…)`).
+- Markers/Arrows Density `0.0` → empty (`_float_socket` in `gpu_overlay`; early-out in `gpu_sample`).
+
+**Hard constraints (do not violate):**
+
+| Constraint | Why |
+|------------|-----|
+| No “free visible verts” from Workbench backface cull | GPU cull is ephemeral; no ID list to Python |
+| Facing ≠ occlusion | Front-facing behind another mesh still passes |
+| Nearest Cap is not the inspect default | Piles labels at camera; starves rest of mesh |
+| Card expand = same bottleneck *class* as old Arrows | Fix with unit quad + `draw_instanced` |
+| BLF × N is the text cliff | Atlas retires hot-path `blf.draw` |
+| `--background` may lack CreateInfo GPU | Soup/BLF fallback required (same as Arrows) |
+| Commit / Scope UX / strangler / Surface inflate | Only if user asks; Scope stays in backlog |
+
+**Target pipe:**
+
+```text
+sample Target∪Scope
+  → facing (optional) + frustum/screen project
+  → Cap policy = screen-space bins (default); ≤ Tag Cap, spread in view
+  → unit quad cards × draw_instanced (soup fallback in background)
+  → glyph atlas textured quads (BLF fallback for misses)
+```
+
+##### Progressive plan (T0–T5)
+
+| Step | Work | Validate / hard stop |
+|------|------|----------------------|
+| **T0 — Baseline** | Before code: Tags harness + optional nearest-pile screenshot | `references/perf/tags_before.json` (cube `height`). Note `tags.collect` / draw-ish spans. |
+| **T1 — Cap policy** | Replace **default** nearest sort with **screen-space binning** after project (+ facing). At most one label per cell; fill ≤ Cap across view. Nearest = optional later mode only. Cap 0 → `[]`. | GUI: labels spread on cube / mesh; Facing on/off; Cap scrub; unit test Cap 0 + bin count ≤ Cap. **Stop if Cap still nearest-only.** |
+| **T2 — Collect CPU** | Vectorize facing where cheap; harden world-label cache; early-outs. Do not change Cap policy semantics. | `tags.collect` ↓ vs T0; visuals = T1. |
+| **T3 — Instanced cards** | Unit quad batch + instance attrs `(sx,sy,w,h[,color])`; CreateInfo shader; `draw_instanced`. Keep `_draw_cards_batched` as `--background` / failure fallback. | Card look parity; headless green via fallback; GUI cards when GPU context exists. |
+| **T4 — Glyph atlas** | Atlas for used glyphs (start alnum/punct); labels → textured quads; BLF only on miss. | Cap ~1k without BLF cliff; screenshot vs BLF reference. |
+| **T5 — Closeout** | `tags_after.json`; Phase 7c checkboxes; version bump if appropriate; rsync for user verify; commit **only if asked** | Depth/ID readback **out of scope** unless T1–T4 insufficient with evidence. |
+
+##### Author
+
+- [x] **T0** baseline harness JSON (`references/perf/tags_before.json`; cube `height`).
+- [x] **T1** screen-bin Cap default; Cap 0 empty; tests.
+- [x] **T2** collect CPU wins (vectorized facing + sample cache; cube collect ~0.46→~0.37 ms).
+- [x] **T3** instanced card quads + soup fallback.
+- [x] **T4** glyph atlas — **reverted to BLF**. Atlas UV/layout were wrong (`hijk` sheet). Revisit after labels look right.
+- [x] **T5** POR/version 0.5.9 / `tags_after.json`; rsync for user verify.
+
+##### Validate
+
+- [x] `tests/test_gpu_sample.py` + `tests/headless_test.py` green.
+- [x] Tag Cap 0 → no labels (unit); Markers Density 0 still empty.
+- [ ] Cap policy: labels spread (not front-pile) on example cube Tags. **GUI**
+- [x] Harness before/after under `references/perf/tags_*.json`.
+- [ ] GUI: Facing toggle, Cap scrub, Size/Color still work.
+- [x] Markers / Surface / Arrows unchanged (headless + gpu_sample).
+
+##### Validation commands
+
+```bash
+# Suite
+blender --background --factory-startup --python-exit-code 1 \
+  --python tests/test_gpu_sample.py
+blender --background --factory-startup --python-exit-code 1 \
+  --python tests/headless_test.py
+
+# Tags harness (T0 / T5)
+blender --background --python-exit-code 1 \
+  --python dev_tasks/001_gpu_overlay/tests/profile_overlay_harness.py -- \
+  --blend examples/attrviz_test_cube.blend \
+  --attr height --displays Tags --max-targets 1 --warm 3 \
+  --json dev_tasks/001_gpu_overlay/references/perf/tags_before.json
+```
+
+GUI gate: example cube or sample_scene_3 — Display Tags; confirm Cap spreads labels; Cap 0 clears; cards/text still readable in Solid. `--background` uses soup cards + BLF (no CreateInfo / OffScreen), same class as Arrows.
+
+**Exit:** Default Cap is inspect-useful; cards not CPU soup on GUI hot path; text not N× BLF on hot path (atlas) — or documented fallback with evidence.
+
+**Impl notes (0.5.9):**
+- Cap socket `min_value=0` (0 = no labels). Engine rebuilds on version drift.
+- `screen_bin_select` / `facing_keep_mask` / `project_world_to_region` are pure numpy (tested headless).
+- Sample cache keyed by watch fingerprint + cheap author-mesh value peek (attr edits bust cache without camera in the key).
+- Atlas charset = alnum + common punct; unknown glyphs (e.g. arbitrary STRING) → per-label BLF.
+
+**Out of scope for 7c:** Scope panel UX, attribute discovery, Surface mute changes, Arrows background-soup removal, compiled Overlay engine, depth-buffer visibility pass (escalate note only if needed).
+
+---
+
 #### Phase 8 — Escalate branch (only if blocked)
 
 If Phase 3/5 depth or scale fails:
@@ -483,7 +619,8 @@ If Phase 3/5 depth or scale fails:
 - Bit-exact OCIO / sheet tone-map parity with EXR panels.
 - Vulkan/Metal work inside Blender source (unless escalate explicitly requires a build plugin plan).
 - Removing materials path before GPU Markers are user-validated.
-- Digit-atlas shader v1 (nice follow-on; Tags BLF OK meanwhile).
+- Digit-atlas / Tags draw perf — **in scope as Phase 7c** (not a non-goal anymore).
+- Watch collection (`attrvis`) landed in 0.5.10. Attribute discovery stays in [`backlog.md`](backlog.md).
 
 ---
 
@@ -534,11 +671,18 @@ blender --background --factory-startup --python-exit-code 1 \
 # GPU sample / Surface identity contract
 blender --background --python-exit-code 1 --python tests/test_gpu_sample.py
 
-# Overlay perf harness (Surface identity P0/P3)
+# Overlay perf harness
 blender --background --python-exit-code 1 \
   --python dev_tasks/001_gpu_overlay/tests/profile_overlay_harness.py -- \
   --max-targets 1 --displays Markers,Surface --warm 2 \
   --json /tmp/attrviz_surface_perf.json
+
+# Tags Phase 7c baseline
+blender --background --python-exit-code 1 \
+  --python dev_tasks/001_gpu_overlay/tests/profile_overlay_harness.py -- \
+  --blend examples/attrviz_test_cube.blend \
+  --attr height --displays Tags --max-targets 1 --warm 3 \
+  --json /tmp/attrviz_tags_perf.json
 ```
 
 Visual bar:
@@ -555,8 +699,9 @@ Ask: “If this were an AOV panel for the attr I’m sampling, would a human tru
 ## Handoff checklist for the next agent
 
 1. Viz panel is fixed (`panel_prop`); do not revive UIList / `bl_parent_id` list experiments without new evidence.
-2. **Next:** Phase 7 **P4 visual gate** (identity Surface on sample_scene_3). P0–P3 done (0.5.6). Do not start Phase 7b until visual gate passes.
-3. After Surface visual: DistLook live smoke, probe thin, screenshots, README roadmap.
-4. GPU overlay / Tags sampler: treat as done unless regression; do not re-litigate Stage A.
-5. Install into Blender when asking the user to click-test (repo ≠ extensions path).
-6. Update Status table as phases complete.
+2. **Watch collection landed (0.5.10).** GUI confirm RMB AttrViz → Visualize Attribute / Edit Add·Remove, then Tags / Arrows / Surface if not user-signed. Do not draw per-viz Target/Scope pickers; do not start attribute discovery.
+3. Tags Cap default is screen-space bins (`tags_draw.screen_bin_select`); do **not** revert to nearest-distance. `--background` soup/BLF fallbacks stay.
+4. Do **not** treat Workbench backface cull as a free visible-vert list.
+5. Deferred only in [`backlog.md`](backlog.md): attribute discovery, DistLook leftovers, strangler, optional Density-on-Tags / depth peek.
+6. Install into Blender when asking the user to click-test (repo ≠ extensions path).
+7. Commit only if asked.
