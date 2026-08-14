@@ -12,9 +12,10 @@ from __future__ import annotations
 import bpy
 import gpu
 import numpy as np
+from bpy.app.handlers import persistent
 from gpu_extras.batch import batch_for_shader
 
-from . import gpu_color, gpu_sample, node_builder
+from . import gpu_color, gpu_sample, node_builder, overlay_kind
 from . import perf
 
 _handle = None
@@ -22,7 +23,17 @@ _caches: dict = {}
 _sample_caches: dict = {}
 
 VECTORISH = frozenset({'FLOAT_VECTOR', 'FLOAT2'})
-GPU_DISPLAYS = frozenset({"Markers", "Surface", "Arrows"})
+GPU_DISPLAYS = overlay_kind.GEOMETRIC_DISPLAYS | overlay_kind.SURFACE_DISPLAYS
+
+
+def _float_socket(val, default):
+    """Read a float socket; keep real 0.0 (``or default`` would drop it)."""
+    if val is None:
+        return float(default)
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def _scene_gpu_on(scene=None) -> bool:
@@ -50,13 +61,13 @@ def _socket_bundle(md):
         attr = node_builder.get_input(md, "Attribute")
         domain = node_builder.menu_input_name(md, "Domain")
         style = node_builder.menu_input_name(md, "Style")
-        density = float(node_builder.get_input(md, "Density") or 1.0)
+        density = _float_socket(node_builder.get_input(md, "Density"), 1.0)
         seed = int(node_builder.get_input(md, "Seed") or 0)
         auto = bool(node_builder.get_input(md, "Auto Range"))
-        rmin = float(node_builder.get_input(md, "Range Min") or 0.0)
-        rmax = float(node_builder.get_input(md, "Range Max") or 1.0)
-        length = float(node_builder.get_input(md, "Length") or 0.08)
-        scale = float(node_builder.get_input(md, "Scale") or 0.02)
+        rmin = _float_socket(node_builder.get_input(md, "Range Min"), 0.0)
+        rmax = _float_socket(node_builder.get_input(md, "Range Max"), 1.0)
+        length = _float_socket(node_builder.get_input(md, "Length"), 0.08)
+        scale = _float_socket(node_builder.get_input(md, "Scale"), 0.02)
         acol = node_builder.get_input(md, "Arrow Color")
         if acol is not None:
             acol = tuple(float(c) for c in acol[:4])
@@ -74,11 +85,11 @@ def _socket_bundle(md):
     }
 
 
-def _sample_key(obj, display, cap, sock, fp):
-    """L0 — what we sample / subsample (topology constant ⇒ stable)."""
+def _sample_key(obj, display, sock, fp):
+    """L0 — what we sample (view-agnostic: Density only, no cap)."""
     return (
         obj.as_pointer(), display, sock["attr"], sock["domain"],
-        sock["density"], sock["seed"], int(cap), fp,
+        sock["density"], sock["seed"], fp,
     )
 
 
@@ -90,12 +101,12 @@ def _present_key(display, sock, extra=()):
     )
 
 
-def _viz_cache_key(obj, md, display, extra=(), cap=50000):
+def _viz_cache_key(obj, md, display, extra=()):
     """Full key (sample + present)."""
     sock = _socket_bundle(md)
     fp = gpu_sample.watch_fingerprint(md)
     return (
-        _sample_key(obj, display, cap, sock, fp)
+        _sample_key(obj, display, sock, fp)
         + _present_key(display, sock, extra=extra)
     )
 
@@ -148,14 +159,15 @@ def _suppress_gn_carriers(scene):
 
 # --- Surface target mute (identity GPU Surface vs Workbench solid) -----
 # Stash Object.display_type and set WIRE for meshes in the active Surface
-# watch set (Target∪Scope). Same scoping as sampling — no attr discovery.
+# watch set (attrvis if it exists, else Target∪Scope). Same scoping as
+# sampling — no attr discovery. Re-run on Add/Remove objects.
 _MUTE_PROP = "attrviz_surface_mute_prev"
 _MUTE_DISPLAY = "WIRE"
 _muted_ptrs: set = set()
 
 
 def _active_surface_watch_meshes(scene):
-    """Meshes covered by enabled GPU Surface visualizers (Target∪Scope)."""
+    """Meshes covered by enabled GPU Surface visualizers."""
     from . import visualizers, viz_modifier
     if not _scene_gpu_on(scene):
         return []
@@ -171,14 +183,9 @@ def _active_surface_watch_meshes(scene):
             display = node_builder.menu_input_name(md, "Display")
         except Exception:
             continue
-        if display != "Surface":
+        if overlay_kind.kind(display) != "surface":
             continue
-        try:
-            target = node_builder.get_input(md, "Target")
-            scope = node_builder.get_input(md, "Scope")
-        except Exception:
-            continue
-        for mesh in gpu_sample.iter_watch_meshes(target, scope):
+        for mesh in gpu_sample.watch_meshes_for_visualizer(md):
             key = mesh.as_pointer()
             if key in seen:
                 continue
@@ -224,11 +231,41 @@ def _restore_target_solid(obj):
     _muted_ptrs.discard(ptr)
 
 
+def _rebuild_muted_ptrs():
+    """as_pointer() values die across file load — rebuild from ID props."""
+    _muted_ptrs.clear()
+    for obj in bpy.data.objects:
+        if _MUTE_PROP in obj:
+            _muted_ptrs.add(obj.as_pointer())
+
+
+@persistent
+def _on_load_post(_dummy):
+    """File open: overlay caches are stale; re-apply Surface WIRE mute.
+
+    Addon register timers do not run again on File → Open. Non-persistent
+    depsgraph handlers are also wiped. Mute must be explicit here — writing
+    display_type from depsgraph_update_post often does not stick.
+    """
+    _rebuild_muted_ptrs()
+    invalidate_all()
+    try:
+        from . import tags_draw
+        tags_draw.invalidate_cache()
+    except Exception:
+        pass
+    try:
+        scene = bpy.context.scene
+        _suppress_gn_carriers(scene)
+    except Exception:
+        pass
+
+
 def _sync_surface_target_mute(scene=None):
     """Idempotent: mute watch-set solids for active GPU Surface vizs.
 
     Safe to call often (depsgraph / state changes). Never from assumptions
-    about attribute-name discovery — only Target∪Scope.
+    about attribute-name discovery — only the resolved watch set.
     """
     scene = scene or bpy.context.scene
     desired = _active_surface_watch_meshes(scene)
@@ -321,8 +358,10 @@ def _get_arrow_shader():
     info.vertex_source(
         "void main()\n"
         "{\n"
-        "  vec3 origin = texelFetch(origin_tex, ivec2(gl_InstanceID, 0), 0).xyz;\n"
-        "  vec3 dir = texelFetch(dir_tex, ivec2(gl_InstanceID, 0), 0).xyz;\n"
+        "  int W = textureSize(origin_tex, 0).x;\n"
+        "  ivec2 uv = ivec2(gl_InstanceID % W, gl_InstanceID / W);\n"
+        "  vec3 origin = texelFetch(origin_tex, uv, 0).xyz;\n"
+        "  vec3 dir = texelFetch(dir_tex, uv, 0).xyz;\n"
         "  vec3 helper = (abs(dir.y) > 0.9) ? vec3(1.0, 0.0, 0.0)\n"
         "                                   : vec3(0.0, 1.0, 0.0);\n"
         "  vec3 side = normalize(cross(dir, helper));\n"
@@ -392,15 +431,13 @@ def _arrow_alive_frames(positions, values):
 
 
 def _float_tex_rgba(rows: np.ndarray):
-    """Upload Nx3 float rows as N×1 RGBA32F texture (w unused)."""
-    import array
-    n = len(rows)
-    rgba = np.zeros((n, 4), dtype=np.float32)
-    rgba[:, :3] = rows
-    arr = array.array('f')
-    arr.frombytes(rgba.tobytes())
-    buf = gpu.types.Buffer('FLOAT', n * 4, arr)
-    return gpu.types.GPUTexture(size=(n, 1), format='RGBA32F', data=buf)
+    """Upload Nx3 float rows as a Metal-safe 2D RGBA32F texture.
+
+    Delegates to overlay_kind.pack_texture_2d; returns only the texture
+    (W is derived in shader via textureSize).
+    """
+    tex, _w = overlay_kind.pack_texture_2d(rows)
+    return tex
 
 
 def _arrow_cone_geometry(positions, values, length: float, radius: float,
@@ -506,7 +543,7 @@ def _refresh_markers(obj, md, positions, values, dtype, density, seed,
         "point_size": 5.0,
     }
     try:
-        scale = float(node_builder.get_input(md, "Scale") or 0.02)
+        scale = _float_socket(node_builder.get_input(md, "Scale"), 0.02)
         entry["point_size"] = max(2.0, min(24.0, scale * 250.0))
     except Exception:
         pass
@@ -518,8 +555,8 @@ def _refresh_arrows(obj, md, positions, values, dtype):
     if dtype not in VECTORISH:
         return {"batch": None, "n": 0, "prim": "TRIS", "empty": True}
     try:
-        length = float(node_builder.get_input(md, "Length") or 0.08)
-        scale = float(node_builder.get_input(md, "Scale") or 0.02)
+        length = _float_socket(node_builder.get_input(md, "Length"), 0.08)
+        scale = _float_socket(node_builder.get_input(md, "Scale"), 0.02)
         # Match GN spirit: Scale drives thickness; cone radius ~ scale * 0.35
         radius = max(1e-5, scale * 0.35)
         acol = node_builder.get_input(md, "Arrow Color")
@@ -656,9 +693,23 @@ def _refresh_viz_impl(obj, md, display, cap=50000):
 
     with perf.span("overlay.cache_key"):
         fp = gpu_sample.watch_fingerprint(md)
-        extra = ("surface",) if display == "Surface" else ()
-        skey = _sample_key(obj, display, cap, sock, fp)
-        pkey = _present_key(display, sock, extra=extra)
+        k = overlay_kind.kind(display)
+        extra = ("surface",) if k == "surface" else ()
+        skey = _sample_key(obj, display, sock, fp)
+
+        # View signature for geometric (upload is view-dependent)
+        vsig = ()
+        if k == "geometric":
+            try:
+                region = bpy.context.region
+                rv3d = bpy.context.region_data
+                if region is not None and rv3d is not None:
+                    vsig = overlay_kind.view_signature(
+                        rv3d.perspective_matrix, region.width, region.height,
+                    )
+            except Exception:
+                pass
+        pkey = _present_key(display, sock, extra=extra + vsig)
 
     ptr = obj.as_pointer()
     cached = _caches.get(ptr)
@@ -672,12 +723,12 @@ def _refresh_viz_impl(obj, md, display, cap=50000):
     sample = _sample_caches.get(ptr)
     if sample is None or sample.get("sample_key") != skey:
         with perf.span(f"overlay.sample_miss.{display}"):
-            if display == "Surface":
+            if k == "surface":
                 sample = _sample_surface(md, style, rmin, rmax, seed)
             else:
                 with perf.span("overlay.sample"):
                     result = gpu_sample.sample_visualizer_targets(
-                        md, density=density, seed=seed, cap=cap,
+                        md, density=density, seed=seed,
                     )
                 if result is None:
                     sample = {
@@ -709,19 +760,39 @@ def _refresh_viz_impl(obj, md, display, cap=50000):
         _caches[ptr] = entry
         return entry
 
+    # --- View cull for geometric (frustum + frame-center budget) ---
+    positions = sample["positions"]
+    values = sample["values"]
+
+    if k == "geometric":
+        with perf.span("overlay.view_cull"):
+            try:
+                region = bpy.context.region
+                rv3d = bpy.context.region_data
+                if region is not None and rv3d is not None:
+                    positions, values, _n = overlay_kind.view_cull_geometric(
+                        positions, values,
+                        rv3d.perspective_matrix,
+                        float(region.width), float(region.height),
+                        cap=cap,
+                    )
+            except Exception:
+                # --background or missing region: skip view pass
+                pass
+
     with perf.span(f"overlay.present.{display}"):
-        if display == "Surface":
+        if k == "surface":
             entry = _refresh_surface_from_sample(
                 sample, style, rmin, rmax, seed,
             )
         elif display == "Arrows":
             entry = _refresh_arrows(
-                obj, md, sample["positions"], sample["values"], sample["dtype"],
+                obj, md, positions, values, sample["dtype"],
             )
         else:
             entry = _refresh_markers(
-                obj, md, sample["positions"], sample["values"], sample["dtype"],
-                density, seed, style, rmin, rmax, sample["n"],
+                obj, md, positions, values, sample["dtype"],
+                density, seed, style, rmin, rmax, len(positions),
             )
 
     entry["sample_key"] = skey
@@ -800,9 +871,11 @@ def _draw_callback_view_impl():
         return
 
     rows = _gpu_visualizers(scene)
-    # Surfaces first (write depth), then points/lines (test only)
-    surfaces = [(o, m, d) for o, m, d in rows if d == "Surface"]
-    others = [(o, m, d) for o, m, d in rows if d != "Surface"]
+    # Surfaces first (write depth), then geometric (test only)
+    surfaces = [(o, m, d) for o, m, d in rows
+                if overlay_kind.kind(d) == "surface"]
+    geometric = [(o, m, d) for o, m, d in rows
+                 if overlay_kind.kind(d) == "geometric"]
 
     gpu.state.depth_test_set('LESS_EQUAL')
     try:
@@ -819,7 +892,7 @@ def _draw_callback_view_impl():
     except Exception:
         pass
     gpu.state.depth_mask_set(False)
-    for obj, md, display in others:
+    for obj, md, display in geometric:
         _draw_gpu_entry(_refresh_viz(obj, md, display))
 
     gpu.state.depth_mask_set(True)
@@ -884,10 +957,14 @@ def register():
         bpy.app.timers.register(_boot_suppress, first_interval=0.1)
     except Exception:
         pass
+    if _on_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_on_load_post)
 
 
 def unregister():
     global _handle
+    if _on_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_on_load_post)
     if _handle is not None:
         bpy.types.SpaceView3D.draw_handler_remove(_handle, 'WINDOW')
         _handle = None

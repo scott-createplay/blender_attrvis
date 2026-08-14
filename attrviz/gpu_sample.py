@@ -12,6 +12,8 @@ import numpy as np
 
 from . import node_builder
 
+WATCH_COLLECTION = "attrvis"
+
 try:
     from . import perf
 except Exception:  # pragma: no cover
@@ -25,6 +27,15 @@ def _span(name):
     return perf.span(name)
 
 SampleResult = Tuple[np.ndarray, np.ndarray, str]
+
+
+def attr_text(val) -> str:
+    """STRING attribute → Python str. Blender 5 stores these as bytes."""
+    if val is None:
+        return ""
+    if isinstance(val, (bytes, bytearray)):
+        return bytes(val).decode("utf-8", errors="replace")
+    return str(val)
 
 
 def _evaluated_mesh(obj: bpy.types.Object):
@@ -62,8 +73,8 @@ def _read_attr(me, name: str, domain: str, n: int):
         attr.data.foreach_get("color", a)
         return a.reshape(-1, 4), dt
     if dt == 'STRING':
-        # No foreach_get for strings — materialize Python strings.
-        return np.array([str(d.value) for d in attr.data], dtype=object), dt
+        # No foreach_get for strings. Blender 5 STRING values are bytes.
+        return np.array([attr_text(d.value) for d in attr.data], dtype=object), dt
     return None, dt
 
 
@@ -252,18 +263,35 @@ def iter_watch_meshes(target, scope) -> List[bpy.types.Object]:
     return out
 
 
-def watch_fingerprint(md) -> tuple:
-    """Cheap Target∪Scope topology + transform signature (no attr read).
+def scene_watch_collection():
+    return bpy.data.collections.get(WATCH_COLLECTION)
 
-    Used by the GPU overlay to decide cache hits *before* sampling.
+
+def watch_meshes_for_visualizer(md) -> List[bpy.types.Object]:
+    """Meshes this viz should sample.
+
+    If scene collection ``attrvis`` exists, it is the watch set for every
+    visualizer (empty → nothing draws). Otherwise fall back to the
+    modifier Target ∪ Scope sockets (tests, files without attrvis).
     """
+    coll = scene_watch_collection()
+    if coll is not None:
+        return iter_watch_meshes(None, coll)
     try:
         target = node_builder.get_input(md, "Target")
         scope = node_builder.get_input(md, "Scope")
     except Exception:
-        return ()
+        return []
+    return iter_watch_meshes(target, scope)
+
+
+def watch_fingerprint(md) -> tuple:
+    """Cheap watch-set topology + transform signature (no attr read).
+
+    Used by the GPU overlay to decide cache hits *before* sampling.
+    """
     parts = []
-    for obj in iter_watch_meshes(target, scope):
+    for obj in watch_meshes_for_visualizer(md):
         me = getattr(obj, "data", None)
         mw = obj.matrix_world
         tw = tuple(mw[i][j] for i in range(4) for j in range(4))
@@ -306,8 +334,6 @@ def _sample_visualizer_targets_impl(
     cap: int = 50000,
 ) -> Optional[SampleResult]:
     try:
-        target = node_builder.get_input(md, "Target")
-        scope = node_builder.get_input(md, "Scope")
         attr = node_builder.get_input(md, "Attribute") or ""
         domain_ui = node_builder.menu_input_name(md, "Domain") or "Point"
     except Exception:
@@ -315,7 +341,7 @@ def _sample_visualizer_targets_impl(
     if not attr:
         return None
 
-    meshes = iter_watch_meshes(target, scope)
+    meshes = watch_meshes_for_visualizer(md)
     if not meshes:
         return None
     if perf is not None:
@@ -348,8 +374,12 @@ def _sample_visualizer_targets_impl(
         if n == 0:
             return positions, values, dtype
 
-        # Density cull (stable)
+        # Density cull (stable). density≤0 → empty (keep real 0.0 from UI).
         density = float(max(0.0, min(1.0, density)))
+        if density <= 1e-12:
+            empty_pos = positions[:0]
+            empty_val = values[:0]
+            return empty_pos, empty_val, dtype
         if density < 1.0 - 1e-6:
             keep = np.empty(n, dtype=bool)
             for i in range(n):
@@ -362,10 +392,8 @@ def _sample_visualizer_targets_impl(
             values = values[keep]
             n = len(positions)
 
-        if n > cap > 0:
-            step = int(np.ceil(n / cap))
-            positions = positions[::step]
-            values = values[::step]
+        # Cap stride removed — view cull (overlay_kind.view_cull_geometric)
+        # handles budget after projection. L0 is Density-only.
 
     return positions, values, dtype
 
@@ -424,8 +452,6 @@ def _build_surface_tris_impl(
     # style/vmin/vmax/seed unused for packing; kept for API compat with overlay.
     _ = (style, vmin, vmax, seed)
     try:
-        target = node_builder.get_input(md, "Target")
-        scope = node_builder.get_input(md, "Scope")
         attr = node_builder.get_input(md, "Attribute") or ""
         domain_ui = node_builder.menu_input_name(md, "Domain") or "Point"
     except Exception:
@@ -433,7 +459,7 @@ def _build_surface_tris_impl(
     if not attr or domain_ui == "Edge":
         return None
 
-    meshes = iter_watch_meshes(target, scope)
+    meshes = watch_meshes_for_visualizer(md)
     if not meshes:
         return None
 
