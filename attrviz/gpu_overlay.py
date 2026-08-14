@@ -170,16 +170,21 @@ _muted_ptrs: set = set()
 
 
 def _active_surface_watch_meshes(scene):
-    """Meshes covered by enabled GPU Surface visualizers (need WIRE mute).
+    """All watched meshes when any Surface visualizer is active.
 
-    GPU overlay draws its own colored TRIS on top — muting the original to
-    WIRE prevents z-fighting. Respects per-viz "Mute Mesh" toggle.
+    GPU overlay IS the visual representation — original meshes in the
+    attrvis collection must be hidden (BOUNDS) to avoid z-fight.
+    Optional wireframe overlay via per-viz toggle.
+
+    Returns list of (obj, show_wire) tuples.
     """
     from . import visualizers, viz_modifier
     if not _scene_gpu_on(scene):
         return []
-    seen = set()
-    out = []
+
+    # Check if ANY active Surface visualizer exists
+    show_wire = False
+    has_surface = False
     for viz in visualizers(scene):
         if viz.hide_viewport:
             continue
@@ -192,23 +197,61 @@ def _active_surface_watch_meshes(scene):
             continue
         if overlay_kind.kind(display) != "surface":
             continue
+        has_surface = True
         try:
-            mute = bool(node_builder.get_input(md, "Mute Mesh"))
+            if bool(node_builder.get_input(md, "Show Wireframe")):
+                show_wire = True
         except Exception:
-            mute = True
-        if not mute:
+            pass
+
+    if not has_surface:
+        return []
+
+    # ALL meshes in the watch collection get muted
+    coll = gpu_sample.scene_watch_collection()
+    if coll is not None:
+        out = []
+        seen = set()
+        for obj in coll.objects:
+            if obj.type != 'MESH':
+                continue
+            key = obj.as_pointer()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((obj, show_wire))
+        return out
+
+    # Fallback: no watch collection — use per-viz Target/Scope meshes
+    out = []
+    seen = set()
+    for viz in visualizers(scene):
+        if viz.hide_viewport:
+            continue
+        md = viz_modifier(viz)
+        if md is None:
+            continue
+        try:
+            display = node_builder.menu_input_name(md, "Display")
+        except Exception:
+            continue
+        if overlay_kind.kind(display) != "surface":
             continue
         for mesh in gpu_sample.watch_meshes_for_visualizer(md):
             key = mesh.as_pointer()
             if key in seen:
                 continue
             seen.add(key)
-            out.append(mesh)
+            out.append((mesh, show_wire))
     return out
 
 
-def _mute_target_solid(obj):
-    """AttrViz-owned solid mute; stash prior display_type once."""
+def _mute_target_solid(obj, show_wire=False):
+    """AttrViz-owned solid mute — hide original so only GPU overlay shows.
+
+    The GPU overlay IS the mesh from the user's perspective.
+    Default: BOUNDS (invisible). show_wire=True for optional wireframe.
+    """
     if obj is None:
         return
     ptr = obj.as_pointer()
@@ -217,9 +260,10 @@ def _mute_target_solid(obj):
             obj[_MUTE_PROP] = str(obj.display_type)
         except Exception:
             obj[_MUTE_PROP] = "TEXTURED"
+    target_dt = "WIRE" if show_wire else "BOUNDS"
     try:
-        if obj.display_type != _MUTE_DISPLAY:
-            obj.display_type = _MUTE_DISPLAY
+        if obj.display_type != target_dt:
+            obj.display_type = target_dt
     except Exception:
         pass
     _muted_ptrs.add(ptr)
@@ -233,7 +277,7 @@ def _restore_target_solid(obj):
     prev = obj.get(_MUTE_PROP) if _MUTE_PROP in obj else None
     if prev is not None:
         try:
-            if obj.display_type == _MUTE_DISPLAY:
+            if obj.display_type in ("WIRE", "BOUNDS"):
                 obj.display_type = prev
         except Exception:
             pass
@@ -282,7 +326,7 @@ def _sync_surface_target_mute(scene=None):
     """
     scene = scene or bpy.context.scene
     desired = _active_surface_watch_meshes(scene)
-    desired_ptrs = {o.as_pointer(): o for o in desired}
+    desired_ptrs = {o.as_pointer(): (o, wire) for o, wire in desired}
 
     # Restore anything we muted that is no longer desired.
     for ptr in list(_muted_ptrs):
@@ -298,8 +342,8 @@ def _sync_surface_target_mute(scene=None):
         else:
             _muted_ptrs.discard(ptr)
 
-    for ptr, obj in desired_ptrs.items():
-        _mute_target_solid(obj)
+    for ptr, (obj, show_wire) in desired_ptrs.items():
+        _mute_target_solid(obj, show_wire=show_wire)
 
 
 def restore_all_surface_mutes():

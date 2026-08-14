@@ -503,9 +503,9 @@ def ensure_viz_group(force=False):
     _sock(t, "Facing Cull", "INPUT", "NodeSocketBool",
           default_value=True,
           description="Tags: skip back-facing elements (Face domain)")
-    _sock(t, "Mute Mesh", "INPUT", "NodeSocketBool",
-          default_value=True,
-          description="Surface: set watched mesh to Wireframe (off = show solid underneath)")
+    _sock(t, "Show Wireframe", "INPUT", "NodeSocketBool",
+          default_value=False,
+          description="Surface: show wireframe edges over the colored overlay")
 
     s_val = _store(t, 40, 120, "vizval", 'FLOAT', pts,
                    nrm.outputs["Result"])

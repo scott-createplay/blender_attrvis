@@ -207,12 +207,12 @@ av.register()
 check("gpu overlay flag default on",
       bool(bpy.context.scene.attrviz_gpu_markers) is True)
 
-# Surface solid mute (z-fight): Target display_type → WIRE while Surface GPU on
+# Surface mute: Target hidden (BOUNDS) while Surface GPU on — no z-fight
 prev_dt = grid.display_type
 node_builder.set_input(md, "Display", "Surface")
 bpy.context.scene.attrviz_gpu_markers = True
 gpu_overlay.suppress_gn_carriers(bpy.context.scene)
-check("surface mute → WIRE", grid.display_type == "WIRE",
+check("surface mute → BOUNDS", grid.display_type == "BOUNDS",
       f"display_type={grid.display_type}")
 check("surface mute stashed prior",
       "attrviz_surface_mute_prev" in grid)

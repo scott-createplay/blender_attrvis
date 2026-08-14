@@ -1044,7 +1044,7 @@ def _draw_viz_body(body, obj, md, attr_name):
         body.label(text="Surface on Edge is weakly supported",
                    icon='INFO')
     if display == "Surface":
-        _draw_socket(body, md, "Mute Mesh", text="Wireframe Original")
+        _draw_socket(body, md, "Show Wireframe")
 
     if colored:
         body.prop(obj, "attrviz_style", text="Color", expand=True)
