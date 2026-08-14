@@ -14,13 +14,15 @@ Houdini's visualizer model on native constructs (POR 005):
 """
 import bpy
 
+from bpy.app.handlers import persistent
+
 from . import node_builder
 from . import tags_draw
 from . import gpu_overlay
 from . import gpu_sample
 
 VIZ_COLLECTION = "Visualizers"
-WATCH_COLLECTION = "attrvis"
+WATCH_COLLECTION = gpu_sample.WATCH_COLLECTION
 VIZ_PANEL_CATEGORY = "Viz"
 _WATCH_NAME_CAP = 8
 VECTORISH = {'FLOAT_VECTOR', 'FLOAT2'}
@@ -73,13 +75,29 @@ def _watch_candidates(context):
     return out
 
 
-def _invalidate_watch():
+def _sync_watch_draw(context=None):
+    """Watch-set or viz-set changed: caches, Surface mute, viewport redraw.
+
+    Call from Add/Remove objects and after removing a visualizer. Overlay
+    fingerprint would eventually miss, but mute must run *now* or new
+    Surface targets stay Solid and z-fight.
+    """
+    ctx = context or bpy.context
+    scene = getattr(ctx, "scene", None) or bpy.context.scene
     try:
         gpu_overlay.invalidate_all()
     except Exception:
         pass
     try:
-        screen = getattr(bpy.context, "screen", None)
+        tags_draw.invalidate_cache()
+    except Exception:
+        pass
+    try:
+        gpu_overlay.suppress_gn_carriers(scene)
+    except Exception:
+        pass
+    try:
+        screen = getattr(ctx, "screen", None)
         if screen is not None:
             for area in screen.areas:
                 if area.type == 'VIEW_3D':
@@ -95,7 +113,7 @@ def _link_to_watch(context, objects):
             continue
         if coll not in obj.users_collection:
             coll.objects.link(obj)
-    _invalidate_watch()
+    _sync_watch_draw(context)
     return coll
 
 
@@ -113,7 +131,7 @@ def _unlink_from_watch(context, objects):
                 and scene_coll not in obj.users_collection):
             scene_coll.objects.link(obj)
         coll.objects.unlink(obj)
-    _invalidate_watch()
+    _sync_watch_draw(context)
     return coll
 
 
@@ -737,10 +755,7 @@ class ATTRVIZ_OT_remove(bpy.types.Operator):
         obj = bpy.data.objects.get(self.name)
         if obj is not None and is_visualizer(obj):
             bpy.data.objects.remove(obj, do_unlink=True)
-        try:
-            gpu_overlay.suppress_gn_carriers(context.scene)
-        except Exception:
-            pass
+        _sync_watch_draw(context)
         return {'FINISHED'}
 
 
@@ -1028,6 +1043,8 @@ def _draw_viz_body(body, obj, md, attr_name):
     if display == "Surface" and domain == "Edge":
         body.label(text="Surface on Edge is weakly supported",
                    icon='INFO')
+    if display == "Surface":
+        _draw_socket(body, md, "Mute Mesh", text="Wireframe Original")
 
     if colored:
         body.prop(obj, "attrviz_style", text="Color", expand=True)
@@ -1146,6 +1163,7 @@ def _set_enabled(self, value):
         pass
 
 
+@persistent
 def _sync_vizcol_active(scene, depsgraph):
     """Workbench Attribute shading needs active Color Attribute on eval mesh."""
     try:
