@@ -23,7 +23,7 @@ _caches: dict = {}
 _sample_caches: dict = {}
 
 VECTORISH = frozenset({'FLOAT_VECTOR', 'FLOAT2'})
-GPU_DISPLAYS = overlay_kind.GEOMETRIC_DISPLAYS - {"Tags"}
+GPU_DISPLAYS = (overlay_kind.GEOMETRIC_DISPLAYS | overlay_kind.SURFACE_DISPLAYS) - {"Tags"}
 
 
 def _float_socket(val, default):
@@ -42,11 +42,8 @@ def _scene_gpu_on(scene=None) -> bool:
 
 
 def invalidate_all():
-    global _solid_color_set
     _caches.clear()
     _sample_caches.clear()
-    _surface_cache.clear()
-    _solid_color_set = False
 
 
 def invalidate(obj=None):
@@ -57,7 +54,6 @@ def invalidate(obj=None):
     ptr = obj.as_pointer()
     _caches.pop(ptr, None)
     _sample_caches.pop(ptr, None)
-    _surface_cache.pop(ptr, None)
 
 
 def _socket_bundle(md):
@@ -174,7 +170,11 @@ _muted_ptrs: set = set()
 
 
 def _active_surface_watch_meshes(scene):
-    """Meshes covered by enabled GPU Surface visualizers with Mute Mesh on."""
+    """Meshes covered by enabled GPU Surface visualizers (need WIRE mute).
+
+    GPU overlay draws its own colored TRIS on top — muting the original to
+    WIRE prevents z-fighting. Respects per-viz "Mute Mesh" toggle.
+    """
     from . import visualizers, viz_modifier
     if not _scene_gpu_on(scene):
         return []
@@ -192,7 +192,6 @@ def _active_surface_watch_meshes(scene):
             continue
         if overlay_kind.kind(display) != "surface":
             continue
-        # Respect per-visualizer "Mute Mesh" toggle (default True)
         try:
             mute = bool(node_builder.get_input(md, "Mute Mesh"))
         except Exception:
@@ -242,15 +241,6 @@ def _restore_target_solid(obj):
             del obj[_MUTE_PROP]
         except Exception:
             pass
-    # Remove vizcol painted by direct surface path
-    ca_name = node_builder.VIZCOL_ATTR
-    me = getattr(obj, "data", None)
-    if me is not None and hasattr(me, "color_attributes"):
-        if ca_name in me.color_attributes:
-            try:
-                me.color_attributes.remove(me.color_attributes[ca_name])
-            except Exception:
-                pass
     _muted_ptrs.discard(ptr)
 
 
@@ -329,18 +319,19 @@ sync_surface_target_mute = _sync_surface_target_mute
 
 def _build_batch(positions, colors, prim='POINTS'):
     with perf.span("overlay.build_batch"):
-        pos_list = [tuple(p) for p in positions]
+        # Pass contiguous float32 arrays directly — no Python tuple conversion
+        pos_arr = np.ascontiguousarray(positions[:, :3], dtype=np.float32)
         try:
             shader = gpu.shader.from_builtin('SMOOTH_COLOR')
-            col_list = [tuple(c) for c in colors]
+            col_arr = np.ascontiguousarray(colors[:, :4], dtype=np.float32)
             batch = batch_for_shader(
-                shader, prim, {"pos": pos_list, "color": col_list},
+                shader, prim, {"pos": pos_arr, "color": col_arr},
             )
             return batch, shader, "smooth"
         except Exception:
             shader = gpu.shader.from_builtin('UNIFORM_COLOR')
             batch = batch_for_shader(
-                shader, prim, {"pos": pos_list},
+                shader, prim, {"pos": pos_arr},
             )
             return batch, shader, "uniform"
 
@@ -684,11 +675,7 @@ def _refresh_surface_from_sample(sample, style, rmin, rmax, seed):
 
 
 def _sample_surface(md, style, rmin, rmax, seed):
-    """L0 Surface — identity mesh tris + corner values (no colormap).
-
-    LEGACY: only used by the Materials path (GPU overlay off).
-    GPU-on Surface now uses _refresh_surface_direct (Color Attribute write).
-    """
+    """L0 Surface — identity mesh tris + corner values (no colormap)."""
     with perf.span("overlay.surface_build"):
         built = gpu_sample.build_surface_tris(
             md, style=style, vmin=rmin, vmax=rmax, seed=seed,
@@ -702,167 +689,6 @@ def _sample_surface(md, style, rmin, rmax, seed):
         "dtype": dtype,
         "n": n_tris,
     }
-
-
-# --- Direct Surface: write Color Attribute on watched mesh ----------------
-_surface_cache: dict = {}  # viz ptr -> cache key
-
-
-def _surface_visualizers(scene):
-    """Active Surface visualizers (GPU overlay on)."""
-    from . import visualizers, viz_modifier
-    if not _scene_gpu_on(scene):
-        return []
-    rows = []
-    for obj in visualizers(scene):
-        if obj.hide_viewport:
-            continue
-        md = viz_modifier(obj)
-        if md is None:
-            continue
-        try:
-            display = node_builder.menu_input_name(md, "Display")
-        except Exception:
-            continue
-        if display != "Surface":
-            continue
-        rows.append((obj, md))
-    return rows
-
-
-def _refresh_surface_direct(md, sock):
-    """Write false-color directly to watched mesh Color Attribute.
-
-    Sub-millisecond: no mesh copy, no GPU batch. Blender's Solid renderer
-    draws the mesh with the active Color Attribute for free.
-    """
-    attr_name = sock["attr"]
-    domain = sock["domain"]
-    style = sock["style"]
-    seed = sock["seed"]
-    rmin = None if sock["auto"] else sock["rmin"]
-    rmax = None if sock["auto"] else sock["rmax"]
-
-    if not attr_name or domain == "Edge":
-        return
-
-    meshes = gpu_sample.watch_meshes_for_visualizer(md)
-    if not meshes:
-        return
-
-    ca_name = node_builder.VIZCOL_ATTR
-
-    for obj in meshes:
-        me = obj.data
-        if me is None:
-            continue
-
-        # Read attribute values from the mesh
-        result = gpu_sample.sample_evaluated(
-            obj, attr_name, domain, world_space=False,
-        )
-        if result is None:
-            continue
-        _positions, values, dtype = result
-        values = np.asarray(values)
-
-        # Compute colors
-        with perf.span("surface.colors"):
-            colors = gpu_color.values_to_colors(
-                values, dtype, style, vmin=rmin, vmax=rmax, seed=seed,
-            )
-
-        # Ensure Color Attribute exists on the watched mesh
-        if ca_name not in me.color_attributes:
-            me.color_attributes.new(ca_name, 'FLOAT_COLOR', 'CORNER')
-        try:
-            me.color_attributes.active_color_name = ca_name
-        except Exception:
-            pass
-        try:
-            me.color_attributes.default_color_name = ca_name
-        except Exception:
-            pass
-
-        n_loops = len(me.loops)
-        if n_loops == 0:
-            continue
-
-        # Expand to CORNER domain
-        with perf.span("surface.expand"):
-            if domain == "Point":
-                loop_vi = np.empty(n_loops, dtype=np.int32)
-                me.loops.foreach_get("vertex_index", loop_vi)
-                corner_colors = colors[loop_vi]
-            elif domain == "Face":
-                n_polys = len(me.polygons)
-                totals = np.empty(n_polys, dtype=np.int32)
-                me.polygons.foreach_get("loop_total", totals)
-                corner_colors = np.repeat(colors, totals, axis=0)
-            elif domain == "Corner":
-                corner_colors = colors
-            else:
-                continue
-
-        # Write
-        with perf.span("surface.write"):
-            ca = me.color_attributes[ca_name]
-            ca.data.foreach_set("color", corner_colors.ravel())
-            me.update()
-
-
-def _ensure_solid_vertex_color():
-    """Set Solid shading to show Color Attributes (once per session)."""
-    try:
-        for area in bpy.context.screen.areas:
-            if area.type != 'VIEW_3D':
-                continue
-            for space in area.spaces:
-                if space.type != 'VIEW_3D':
-                    continue
-                sh = space.shading
-                if sh.type == 'SOLID' and sh.color_type != 'VERTEX':
-                    sh.color_type = 'VERTEX'
-    except Exception:
-        pass
-
-
-_solid_color_set = False
-
-
-def _paint_surfaces(scene):
-    """Paint all active Surface visualizers (called from draw or depsgraph)."""
-    global _solid_color_set
-    rows = _surface_visualizers(scene)
-    if not rows:
-        return
-
-    # Ensure Solid shading shows vertex colors (once)
-    if not _solid_color_set:
-        _ensure_solid_vertex_color()
-        _solid_color_set = True
-
-    for obj, md in rows:
-        sock = _socket_bundle(md)
-        fp = gpu_sample.watch_fingerprint(md)
-        key = (obj.as_pointer(), sock["attr"], sock["domain"], sock["style"],
-               sock["auto"], sock["rmin"], sock["rmax"], sock["seed"], fp)
-
-        ptr = obj.as_pointer()
-        if _surface_cache.get(ptr) == key:
-            continue  # already painted with same params
-
-        with perf.span("surface.paint"):
-            _refresh_surface_direct(md, sock)
-        _surface_cache[ptr] = key
-
-
-def invalidate_surface(obj=None):
-    """Drop surface paint cache so next draw repaints."""
-    if obj is None:
-        _surface_cache.clear()
-    else:
-        _surface_cache.pop(obj.as_pointer(), None)
 
 
 def _refresh_viz(obj, md, display, cap=50000):
@@ -1057,20 +883,28 @@ def _draw_callback_view_impl():
     if not _scene_gpu_on(scene):
         return
 
-    # Surface: direct Color Attribute write (no GPU batch needed)
-    with perf.span("overlay.surfaces"):
-        _paint_surfaces(scene)
-
-    # Geometric overlays (Markers, Arrows)
     rows = _gpu_visualizers(scene)
+    surfaces = [(o, m, d) for o, m, d in rows
+                if overlay_kind.kind(d) == "surface"]
+    geometric = [(o, m, d) for o, m, d in rows
+                 if overlay_kind.kind(d) == "geometric"]
 
     gpu.state.depth_test_set('LESS_EQUAL')
+    try:
+        gpu.state.face_culling_set('BACK')
+    except Exception:
+        pass
+
+    gpu.state.depth_mask_set(True)
+    for obj, md, display in surfaces:
+        _draw_gpu_entry(_refresh_viz(obj, md, display))
+
     try:
         gpu.state.face_culling_set('NONE')
     except Exception:
         pass
     gpu.state.depth_mask_set(False)
-    for obj, md, display in rows:
+    for obj, md, display in geometric:
         _draw_gpu_entry(_refresh_viz(obj, md, display))
 
     gpu.state.depth_mask_set(True)
