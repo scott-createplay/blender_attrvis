@@ -497,14 +497,14 @@ def _build_surface_tris_impl(
         cos = cos.reshape(-1, 3)
 
         with _span("sample.surface_tri_pack"):
-            # Vectorized identity expand: all loop-tris, no mutate/filter.
-            vert_ids = np.empty((n_tris, 3), dtype=np.int32)
+            vert_ids = np.empty(n_tris * 3, dtype=np.int32)
             poly_ids = np.empty(n_tris, dtype=np.int32)
-            loop_ids = np.empty((n_tris, 3), dtype=np.int32)
-            for i, tri in enumerate(tris):
-                vert_ids[i] = tri.vertices
-                poly_ids[i] = tri.polygon_index
-                loop_ids[i] = tri.loops
+            loop_ids = np.empty(n_tris * 3, dtype=np.int32)
+            tris.foreach_get("vertices", vert_ids)
+            tris.foreach_get("polygon_index", poly_ids)
+            tris.foreach_get("loops", loop_ids)
+            vert_ids = vert_ids.reshape(n_tris, 3)
+            loop_ids = loop_ids.reshape(n_tris, 3)
 
             m = n_tris * 3
             flat_vi = vert_ids.reshape(-1)

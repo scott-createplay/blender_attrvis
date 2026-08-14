@@ -489,8 +489,8 @@ def ensure_viz_group(force=False):
           default_value=(0.95, 0.55, 0.10, 1.0),
           description="Arrows: solid tint (per visualizer)")
     _sock(t, "Tag Cap", "INPUT", "NodeSocketInt", default_value=10000,
-          min_value=1, max_value=10000,
-          description="Tags: max labels drawn (scale budget)")
+          min_value=0, max_value=10000,
+          description="Tags: max labels (0 = none; screen-space spread, not nearest)")
     _sock(t, "Tag Size", "INPUT", "NodeSocketInt", default_value=14,
           min_value=6, max_value=64,
           description="Tags: font size in pixels (integer steps)")
@@ -503,6 +503,9 @@ def ensure_viz_group(force=False):
     _sock(t, "Facing Cull", "INPUT", "NodeSocketBool",
           default_value=True,
           description="Tags: skip back-facing elements (Face domain)")
+    _sock(t, "Mute Mesh", "INPUT", "NodeSocketBool",
+          default_value=True,
+          description="Surface: set watched mesh to Wireframe (off = show solid underneath)")
 
     s_val = _store(t, 40, 120, "vizval", 'FLOAT', pts,
                    nrm.outputs["Result"])

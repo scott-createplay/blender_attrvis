@@ -170,7 +170,7 @@ _muted_ptrs: set = set()
 
 
 def _active_surface_watch_meshes(scene):
-    """Meshes covered by enabled GPU Surface visualizers."""
+    """Meshes covered by enabled GPU Surface visualizers with Mute Mesh on."""
     from . import visualizers, viz_modifier
     if not _scene_gpu_on(scene):
         return []
@@ -187,6 +187,13 @@ def _active_surface_watch_meshes(scene):
         except Exception:
             continue
         if overlay_kind.kind(display) != "surface":
+            continue
+        # Respect per-visualizer "Mute Mesh" toggle (default True)
+        try:
+            mute = bool(node_builder.get_input(md, "Mute Mesh"))
+        except Exception:
+            mute = True
+        if not mute:
             continue
         for mesh in gpu_sample.watch_meshes_for_visualizer(md):
             key = mesh.as_pointer()
