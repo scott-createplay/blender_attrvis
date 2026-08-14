@@ -437,24 +437,29 @@ def _labels_for_md(obj, md, cam_pos, region, rv3d):
     if n_kept == 0:
         return []
 
-    # Project kept set to screen for label placement
+    # Project kept set to screen for label placement + depth for occlusion
     with _span("tags.project"):
-        sx, sy, valid = project_world_to_region(
-            positions,
-            np.array(persp, dtype=np.float64).reshape(4, 4),
-            rw, rh,
-        )
-        # All should be valid (already frustum-culled), but filter stragglers
+        persp_np = np.array(persp, dtype=np.float64).reshape(4, 4)
+        sx, sy, valid = project_world_to_region(positions, persp_np, rw, rh)
+
+        # Compute NDC depth for occlusion testing
+        hom = np.ones((len(positions), 4), dtype=np.float64)
+        hom[:, :3] = positions
+        prj = hom @ persp_np.T
+        w_clip = prj[:, 3]
+        w_safe = np.where(w_clip > 1e-12, w_clip, 1.0)
+        ndc_z = (prj[:, 2] / w_safe) * 0.5 + 0.5
+
+        # Filter invalid
         if not np.all(valid):
             mask = valid
-            sx, sy = sx[mask], sy[mask]
-            positions = positions[mask]
+            sx, sy, ndc_z = sx[mask], sy[mask], ndc_z[mask]
             values = values[mask]
 
     screen = []
     for i in range(len(sx)):
         text = _fmt_value(_value_at(values, int(i), dtype), dtype, decimals)
-        screen.append((float(sx[i]), float(sy[i]), text))
+        screen.append((float(sx[i]), float(sy[i]), float(ndc_z[i]), text))
     return screen
 
 
@@ -587,6 +592,10 @@ def draw_callback_px():
     gpu.state.blend_set("ALPHA")
     font_id = 0
 
+    # Read depth buffer once per frame (fast path: ~2ms)
+    with _span("tags.depth_read"):
+        depth_arr = overlay_kind.read_depth_buffer()
+
     for obj, md in _tag_visualizers():
         try:
             size = max(0, _int_socket(node_builder.get_input(md, "Tag Size"), 14))
@@ -598,6 +607,19 @@ def draw_callback_px():
         if not screen or size <= 0:
             continue
 
+        # Depth occlusion: skip tags behind scene geometry
+        if depth_arr is not None:
+            with _span("tags.occlusion"):
+                sx_arr = np.array([s[0] for s in screen], dtype=np.float32)
+                sy_arr = np.array([s[1] for s in screen], dtype=np.float32)
+                z_arr = np.array([s[2] for s in screen], dtype=np.float32)
+                visible = overlay_kind.occlusion_filter(
+                    sx_arr, sy_arr, z_arr, depth_arr,
+                )
+                screen = [s for s, v in zip(screen, visible) if v]
+            if not screen:
+                continue
+
         blf.size(font_id, max(6, size))
         blf.color(
             font_id,
@@ -607,7 +629,7 @@ def draw_callback_px():
         pad_x, pad_y = 6.0, 4.0
         cards = []
         draw_text = []
-        for sx, sy, label in screen:
+        for sx, sy, _z, label in screen:
             tw, th = blf.dimensions(font_id, label)
             cards.append((sx, sy, tw + pad_x * 2, th + pad_y * 2))
             draw_text.append((sx, sy, tw, th, label))

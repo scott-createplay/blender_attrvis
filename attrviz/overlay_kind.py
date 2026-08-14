@@ -178,6 +178,90 @@ def view_signature(mat, rw: float, rh: float) -> tuple:
     return (int(rw), int(rh)) + m_tuple
 
 
+# ---------------------------------------------------------------------------
+# Depth-based occlusion filter (for POST_PIXEL presenters like Tags)
+# ---------------------------------------------------------------------------
+
+_depth_buf = None  # reusable pre-allocated Buffer
+_depth_arr = None  # cached numpy view for current frame
+_depth_frame = -1  # frame number of cached depth
+
+
+def read_depth_buffer():
+    """Read the active framebuffer's depth into a numpy array (fast path).
+
+    Returns (depth_array shaped [h, w], w, h) or None if unavailable.
+    Caches per frame — safe to call multiple times in one draw handler.
+    Uses pre-allocated Buffer + np.frombuffer(bytes()) to avoid the
+    100ms+ to_list() penalty.
+    """
+    global _depth_buf, _depth_arr, _depth_frame
+    import gpu
+    import bpy
+
+    try:
+        frame = bpy.context.scene.frame_current
+    except Exception:
+        frame = -1
+
+    # Return cached if same frame
+    if _depth_arr is not None and _depth_frame == frame:
+        return _depth_arr
+
+    try:
+        viewport = gpu.state.viewport_get()
+        w, h = int(viewport[2]), int(viewport[3])
+        if w < 1 or h < 1:
+            return None
+
+        fb = gpu.state.active_framebuffer_get()
+        n_pixels = w * h
+
+        # Reuse or allocate buffer
+        if _depth_buf is None or len(_depth_buf) != n_pixels:
+            _depth_buf = gpu.types.Buffer('FLOAT', n_pixels)
+
+        fb.read_depth(0, 0, w, h, data=_depth_buf)
+        _depth_arr = np.frombuffer(
+            bytes(_depth_buf), dtype=np.float32,
+        ).reshape(h, w).copy()
+        _depth_frame = frame
+        return _depth_arr
+    except Exception:
+        _depth_arr = None
+        return None
+
+
+def depth_buffer_size():
+    """Return (w, h) of the current depth buffer, or (0, 0)."""
+    import gpu
+    try:
+        viewport = gpu.state.viewport_get()
+        return int(viewport[2]), int(viewport[3])
+    except Exception:
+        return 0, 0
+
+
+def occlusion_filter(sx, sy, projected_z, depth_arr, bias=0.001):
+    """Filter screen-space points by depth occlusion.
+
+    Args:
+        sx, sy: screen coordinates (float arrays, length N).
+        projected_z: NDC depth of each point (0=near, 1=far), length N.
+        depth_arr: numpy array [h, w] from read_depth_buffer().
+        bias: depth tolerance (points slightly behind scene still pass).
+
+    Returns:
+        boolean mask (True = visible, False = occluded).
+    """
+    h, w = depth_arr.shape
+    # Clamp to valid pixel coords
+    ix = np.clip(sx.astype(np.int32), 0, w - 1)
+    iy = np.clip(sy.astype(np.int32), 0, h - 1)
+    scene_depth = depth_arr[iy, ix]
+    return projected_z <= scene_depth + bias
+
+
 def pack_texture_2d(rows: np.ndarray):
     """Upload Nx3 float rows as a 2D RGBA32F texture (Metal-safe).
 

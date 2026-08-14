@@ -277,6 +277,54 @@ def test_view_cull_no_region_passthrough():
     print(f"  view_cull cap=0: {n_kept} kept  OK")
 
 
+def test_occlusion_filter_basic():
+    """occlusion_filter hides points behind scene geometry."""
+    import numpy as np
+    sys.path.insert(0, ".")
+    from attrviz.overlay_kind import occlusion_filter
+
+    # 4x4 depth buffer: top-left near (0.1), rest far (1.0)
+    depth_arr = np.ones((4, 4), dtype=np.float32)
+    depth_arr[3, 0] = 0.1  # pixel (0,3) is near — note y=3 because row 3
+
+    # 3 points at pixel (0,3), (2,2), (1,1)
+    sx = np.array([0.0, 2.0, 1.0], dtype=np.float32)
+    sy = np.array([3.0, 2.0, 1.0], dtype=np.float32)
+
+    # Point 0 at z=0.5, behind the near surface at 0.1 → occluded
+    # Point 1 at z=0.5, scene depth 1.0 → visible
+    # Point 2 at z=0.05, scene depth 1.0 → visible
+    z = np.array([0.5, 0.5, 0.05], dtype=np.float32)
+
+    visible = occlusion_filter(sx, sy, z, depth_arr, bias=0.001)
+    assert not visible[0], "point behind near surface should be occluded"
+    assert visible[1], "point in front of far should be visible"
+    assert visible[2], "point very near should be visible"
+    print("  occlusion_filter basic: occluded/visible correct  OK")
+
+
+def test_occlusion_filter_bias():
+    """Bias allows points just slightly behind to pass."""
+    import numpy as np
+    sys.path.insert(0, ".")
+    from attrviz.overlay_kind import occlusion_filter
+
+    depth_arr = np.full((4, 4), 0.5, dtype=np.float32)
+    sx = np.array([1.0], dtype=np.float32)
+    sy = np.array([1.0], dtype=np.float32)
+
+    # Point barely behind (0.501 vs 0.5) — with bias=0.01 should pass
+    z = np.array([0.501], dtype=np.float32)
+    visible = occlusion_filter(sx, sy, z, depth_arr, bias=0.01)
+    assert visible[0], "point within bias should be visible"
+
+    # Point well behind (0.6 vs 0.5) — should be occluded
+    z2 = np.array([0.6], dtype=np.float32)
+    visible2 = occlusion_filter(sx, sy, z2, depth_arr, bias=0.01)
+    assert not visible2[0], "point well behind should be occluded"
+    print("  occlusion_filter bias tolerance: pass/fail correct  OK")
+
+
 if __name__ == "__main__":
     print("test_overlay_kinds: pack_dims")
     test_pack_dims()
@@ -300,4 +348,8 @@ if __name__ == "__main__":
     test_view_cull_offscreen_skipped()
     print("test_overlay_kinds: view_cull_cap_zero")
     test_view_cull_no_region_passthrough()
+    print("test_overlay_kinds: occlusion_filter_basic")
+    test_occlusion_filter_basic()
+    print("test_overlay_kinds: occlusion_filter_bias")
+    test_occlusion_filter_bias()
     print("\nAll test_overlay_kinds passed.")
