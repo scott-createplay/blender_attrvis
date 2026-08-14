@@ -23,7 +23,7 @@ _caches: dict = {}
 _sample_caches: dict = {}
 
 VECTORISH = frozenset({'FLOAT_VECTOR', 'FLOAT2'})
-GPU_DISPLAYS = overlay_kind.GEOMETRIC_DISPLAYS | overlay_kind.SURFACE_DISPLAYS
+GPU_DISPLAYS = (overlay_kind.GEOMETRIC_DISPLAYS | overlay_kind.SURFACE_DISPLAYS) - {"Tags"}
 
 
 def _float_socket(val, default):
@@ -129,8 +129,11 @@ def _gpu_visualizers(scene):
     return rows
 
 
+_SUPPRESS_DISPLAYS = overlay_kind.GEOMETRIC_DISPLAYS | overlay_kind.SURFACE_DISPLAYS
+
+
 def _suppress_gn_carriers(scene):
-    """When GPU overlay on, hide GN carrier mesh for Markers/Surface/Arrows.
+    """When GPU overlay on, hide GN carrier mesh for all GPU-drawn displays.
 
     Call from state changes (GPU flag, Enabled, Display) — never from the
     draw handler (writing modifiers there thrashs the depsgraph).
@@ -146,7 +149,7 @@ def _suppress_gn_carriers(scene):
             display = node_builder.menu_input_name(md, "Display")
         except Exception:
             continue
-        if display not in GPU_DISPLAYS:
+        if display not in _SUPPRESS_DISPLAYS:
             continue
         enabled = not obj.hide_viewport
         if use_gpu and enabled:
