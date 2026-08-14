@@ -121,7 +121,8 @@ def _run_tags(obj, rounds: int):
         with perf.span("harness.tags_round"):
             tags_draw._collect_tags(
                 md, cam,
-                cap=int(node_builder.get_input(md, "Tag Cap") or 10000),
+                cap=tags_draw._int_socket(
+                    node_builder.get_input(md, "Tag Cap"), 10000),
                 facing_cull=False,
             )
 

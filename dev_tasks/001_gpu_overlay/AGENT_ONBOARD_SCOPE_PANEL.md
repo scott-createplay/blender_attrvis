@@ -11,6 +11,8 @@
 A visualizer watches Target ∪ Scope (`gpu_sample.iter_watch_meshes`). The **GUI** path is stricter:
 
 - One scene collection named `attrvis` (nested children included).
+- If `attrvis` **exists**, it is the watch set for **every** visualizer — including GPU overlay / Tags. Empty → nothing draws (per-viz Scope sockets are ignored).
+- If `attrvis` is absent, fall back to modifier Target ∪ Scope (tests, city `--viz`, old files).
 - Membership **is** the scope. Objects may also live in `Buildings` / the scene / etc.
 - Distinct from `Visualizers` (viz-object registry).
 - Meshes are **not** discovered by attribute name.

@@ -49,6 +49,30 @@ def make_grid(name, segments=4, size=2.0):
     return obj
 
 
+def make_vert_mesh(name, n=8):
+    me = bpy.data.meshes.new(name)
+    me.vertices.add(n)
+    for i in range(n):
+        me.vertices[i].co = (float(i % 4), float(i // 4), 0.0)
+    obj = bpy.data.objects.new(name, me)
+    bpy.context.collection.objects.link(obj)
+    return obj
+
+
+def make_pointcloud(name, n=8, loc=(0.0, 0.0, 0.0)):
+    """Native POINTCLOUD via mesh convert (Python cannot points.add)."""
+    src = make_vert_mesh(name, n)
+    src.location = loc
+    for o in list(bpy.context.view_layer.objects):
+        o.select_set(False)
+    src.select_set(True)
+    bpy.context.view_layer.objects.active = src
+    bpy.ops.object.convert(target='POINTCLOUD')
+    obj = bpy.context.view_layer.objects.active
+    bpy.context.view_layer.update()
+    return obj
+
+
 print("\n== AttrViz gpu_sample ==")
 bpy.ops.object.select_all(action='SELECT')
 bpy.ops.object.delete(use_global=False)
@@ -303,6 +327,627 @@ gs = viz.evaluated_get(deps).evaluated_geometry()
 mesh = gs.mesh
 npts = len(mesh.vertices) if mesh else 0
 check("GN markers still emit when GPU off", npts >= nv * 12, f"verts={npts}")
+
+print("\n== P0: per-viz ramp tree (off-engine, GPU-on shared) ==")
+bpy.context.scene.attrviz_gpu_markers = True
+va = av.add_visualizer(
+    bpy.context, target=grid, attribute="heat",
+    domain="Point", style="Heat", display="Markers",
+    name="Viz · ramp A",
+)
+vb = av.add_visualizer(
+    bpy.context, target=grid, attribute="heat",
+    domain="Point", style="Heat", display="Markers",
+    name="Viz · ramp B",
+)
+ga, gb = av.viz_modifier(va).node_group, av.viz_modifier(vb).node_group
+ra = node_builder.ramp_node_for_viz(va)
+rb = node_builder.ramp_node_for_viz(vb)
+ta = node_builder.ramp_tree_for_viz(va)
+tb = node_builder.ramp_tree_for_viz(vb)
+engine_ramp = next(
+    (n for n in ga.nodes if n.bl_idname == "ShaderNodeValToRGB"), None,
+)
+check("GPU-on vizs share engine group", ga is gb, f"{ga} vs {gb}")
+check("each viz has a ramp node", ra is not None and rb is not None)
+check("ramp trees are distinct", ta is not tb and ta is not None)
+check("ramp ColorRamps are distinct",
+      ra is not None and rb is not None and ra.color_ramp is not rb.color_ramp)
+check("off-engine ramp is not the engine ValToRGB",
+      ra is not None and ra is not engine_ramp)
+check("new ramp has Heat 5-stop",
+      ra is not None and len(ra.color_ramp.elements) == 5,
+      str(None if ra is None else len(ra.color_ramp.elements)))
+if ra is not None and rb is not None:
+    rb.color_ramp.elements[0].color = (1.0, 0.0, 0.0, 1.0)
+    check("editing one ramp does not change the other",
+          tuple(ra.color_ramp.elements[0].color)
+          != tuple(rb.color_ramp.elements[0].color))
+old_tb = tb
+if node_builder.RAMP_PROP in vb:
+    del vb[node_builder.RAMP_PROP]
+if old_tb is not None and old_tb.users == 0:
+    bpy.data.node_groups.remove(old_tb)
+check("cleared ramp pointer is None", node_builder.ramp_node_for_viz(vb) is None)
+av.migrate_all_visualizers()
+check("migrate restores ramp node", node_builder.ramp_node_for_viz(vb) is not None)
+node_builder.release_viz_ramp(va)
+node_builder.release_viz_ramp(vb)
+bpy.data.objects.remove(va, do_unlink=True)
+bpy.data.objects.remove(vb, do_unlink=True)
+
+print("\n== P1: ramp_colors + extract_ramp ==")
+bw = (
+    (0.0, 0.0, 0.0, 0.0, 1.0),
+    (1.0, 1.0, 1.0, 1.0, 1.0),
+)
+v = np.array([0.0, 0.5, 1.0], dtype=np.float32)
+c_bw = gpu_color.ramp_colors(v, bw, vmin=0.0, vmax=1.0)
+check("2-stop black→white endpoints",
+      np.allclose(c_bw[0, :3], 0.0) and np.allclose(c_bw[2, :3], 1.0),
+      str(c_bw))
+check("2-stop midpoint is gray",
+      np.allclose(c_bw[1, :3], 0.5, atol=1e-5), str(c_bw[1]))
+
+v5 = np.array([0.0, 0.25, 0.5, 0.75], dtype=np.float32)
+h5 = gpu_color.heat_colors(v5, vmin=0.0, vmax=1.0)
+r5 = gpu_color.ramp_colors(v5, gpu_color.HEAT_STOPS, vmin=0.0, vmax=1.0)
+check("5-stop matches heat_colors (interior)",
+      np.allclose(h5, r5, atol=1e-5),
+      f"max_delta={np.max(np.abs(h5 - r5))}")
+
+clip = gpu_color.ramp_colors(
+    np.array([-10.0, 10.0], dtype=np.float32), bw, vmin=0.0, vmax=1.0)
+check("below vmin → first stop", np.allclose(clip[0, :3], 0.0))
+check("above vmax → last stop", np.allclose(clip[1, :3], 1.0))
+same = gpu_color.ramp_colors(
+    np.array([3.0, 3.0], dtype=np.float32), bw, vmin=3.0, vmax=3.0)
+check("hi<=lo → first stop", np.allclose(same[:, :3], 0.0))
+empty = gpu_color.ramp_colors(np.zeros((0,), dtype=np.float32), bw)
+check("empty values shape", empty.shape == (0, 4), str(empty.shape))
+solid = gpu_color.ramp_colors(
+    np.array([0.0, 1.0], dtype=np.float32),
+    ((0.5, 1.0, 0.0, 0.0, 1.0),),
+    vmin=0.0, vmax=1.0,
+)
+check("1-stop is solid", np.allclose(solid[:, :3], (1.0, 0.0, 0.0)))
+
+lut = gpu_color.ramp_lut_rgba(bw, n=256)
+check("LUT is 256×4", lut.shape == (256, 4), str(lut.shape))
+check("LUT endpoints",
+      np.allclose(lut[0, :3], 0.0) and np.allclose(lut[-1, :3], 1.0))
+
+ramp_node = node_builder.ensure_viz_ramp(viz)
+ext = gpu_color.extract_ramp(ramp_node)
+check("extract_ramp from viz node has 5 stops", len(ext) == 5, str(len(ext)))
+check("extract_ramp first pos is 0", abs(ext[0][0]) < 1e-6)
+
+custom = ((0.0, 1.0, 0.0, 0.0, 1.0), (1.0, 0.0, 0.0, 1.0, 1.0))
+cols_r = gpu_color.values_to_colors(
+    np.array([0.0, 1.0], dtype=np.float32), "FLOAT", "Heat",
+    vmin=0.0, vmax=1.0, ramp=custom,
+)
+check("values_to_colors ramp= overrides heat",
+      np.allclose(cols_r[0, :3], (1.0, 0.0, 0.0))
+      and np.allclose(cols_r[1, :3], (0.0, 0.0, 1.0)),
+      str(cols_r))
+cols_rgb = gpu_color.values_to_colors(
+    np.array([[1.0, 0.0, 0.0]], dtype=np.float32), "FLOAT_VECTOR", "RGB",
+    ramp=custom,
+)
+check("RGB ignores ramp=", cols_rgb.shape == (1, 4), str(cols_rgb.shape))
+
+node_builder.set_input(md, "Display", "Surface")
+node_builder.set_input(md, "Style", "Heat")
+node_builder.set_input(md, "Attribute", "heat")
+node_builder.set_input(md, "Domain", "Point")
+gpu_overlay.invalidate(viz)
+e1 = gpu_overlay._refresh_viz(viz, md, "Surface")
+c1 = e1.get("colors")
+rn = node_builder.ramp_node_for_viz(viz)
+rn.color_ramp.elements[0].color = (1.0, 0.0, 0.0, 1.0)
+rn.color_ramp.elements[-1].color = (0.0, 0.0, 1.0, 1.0)
+e2 = gpu_overlay._refresh_viz(viz, md, "Surface")
+c2 = e2.get("colors")
+if e2.get("mode") == "heat_lut":
+    check("ramp edit keeps heat_lut batch",
+          e1.get("batch") is e2.get("batch"))
+    check("ramp edit updates lut_key",
+          e1.get("lut_key") != e2.get("lut_key"))
+else:
+    check("CPU fallback recolors on ramp edit",
+          c1 is not None and c2 is not None and not np.allclose(c1, c2),
+          f"mode={e2.get('mode')} c1={None if c1 is None else c1[0]} "
+          f"c2={None if c2 is None else c2[0]}")
+check("heat lut shader probe does not raise",
+      gpu_overlay._heat_lut_shader_available() in (True, False))
+print(f"  heat lut: "
+      f"{'SHADER' if gpu_overlay._heat_lut_shader_available() else 'CPU fallback'}")
+
+print("\n== P2: panel ramp widget target ==")
+bpy.context.scene.attrviz_gpu_markers = True
+panel = av._panel_heat_ramp_node(viz, md)
+engine = next(
+    (n for n in md.node_group.nodes
+     if n.bl_idname == "ShaderNodeValToRGB"), None,
+)
+check("GPU-on panel ramp is off-engine",
+      panel is not None and engine is not None
+      and panel.as_pointer() != engine.as_pointer())
+off_n = node_builder.ramp_node_for_viz(viz)
+check("GPU-on panel ramp is ensure_viz_ramp",
+      panel is not None and off_n is not None
+      and panel.as_pointer() == off_n.as_pointer(),
+      f"panel={panel} off={off_n}")
+before = tuple(engine.color_ramp.elements[0].color)
+panel.color_ramp.elements[0].color = (0.1, 0.2, 0.3, 1.0)
+check("editing panel ramp does not dirty shared engine",
+      tuple(engine.color_ramp.elements[0].color) == before)
+vc = av.add_visualizer(
+    bpy.context, target=grid, attribute="heat",
+    domain="Point", style="Heat", display="Surface",
+    name="Viz · panel peer",
+)
+p_peer = av._panel_heat_ramp_node(vc, av.viz_modifier(vc))
+check("two vizs have distinct panel ramps",
+      p_peer is not None and p_peer is not panel)
+node_builder.release_viz_ramp(vc)
+bpy.data.objects.remove(vc, do_unlink=True)
+
+bpy.context.scene.attrviz_gpu_markers = False
+vd = av.add_visualizer(
+    bpy.context, target=grid, attribute="heat",
+    domain="Point", style="Heat", display="Markers",
+    name="Viz · gpuoff ramp",
+)
+mdd = av.viz_modifier(vd)
+pd = av._panel_heat_ramp_node(vd, mdd)
+ed = next(
+    (n for n in mdd.node_group.nodes
+     if n.bl_idname == "ShaderNodeValToRGB"), None,
+)
+check("GPU-off panel ramp is engine ValToRGB",
+      pd is not None and ed is not None
+      and pd.as_pointer() == ed.as_pointer(),
+      f"pd={pd} ed={ed} gpu={av._gpu_overlay_on()}")
+node_builder.release_viz_ramp(vd)
+bpy.data.objects.remove(vd, do_unlink=True)
+bpy.context.scene.attrviz_gpu_markers = True
+
+try:
+    gpu_overlay._subscribe_ramp_msgbus()
+    gpu_overlay._tag_view3d_redraw()
+    _msgbus_ok, _msgbus_err = True, ""
+except Exception as exc:
+    _msgbus_ok, _msgbus_err = False, str(exc)
+check("ramp msgbus subscribe + redraw do not raise",
+      _msgbus_ok, _msgbus_err)
+
+print("\n== P3: ramp presets (Heat / RGB / BnW) ==")
+rn = node_builder.ensure_viz_ramp(viz)
+node_builder.apply_ramp_preset(rn, "bnw")
+check("BnW has 2 stops", len(rn.color_ramp.elements) == 2,
+      str(len(rn.color_ramp.elements)))
+check("BnW start is black",
+      all(abs(rn.color_ramp.elements[0].color[i]) < 1e-5 for i in range(3)))
+check("BnW end is white",
+      all(abs(rn.color_ramp.elements[-1].color[i] - 1.0) < 1e-5
+          for i in range(3)))
+node_builder.apply_ramp_preset(rn, "heat")
+check("Heat after BnW has 5 stops (replace, not accumulate)",
+      len(rn.color_ramp.elements) == 5, str(len(rn.color_ramp.elements)))
+node_builder.apply_ramp_preset(rn, "rgb")
+check("RGB preset has 5 stops",
+      len(rn.color_ramp.elements) == 5, str(len(rn.color_ramp.elements)))
+node_builder.apply_ramp_preset(rn, "heat")
+check("Heat again still 5",
+      len(rn.color_ramp.elements) == 5, str(len(rn.color_ramp.elements)))
+
+bpy.context.scene.attrviz_gpu_markers = True
+node_builder.set_input(md, "Display", "Surface")
+node_builder.set_input(md, "Style", "RGB")
+node_builder.set_input(md, "Attribute", "heat")
+node_builder.set_input(md, "Domain", "Point")
+gpu_overlay.invalidate(viz)
+e_h = gpu_overlay._refresh_viz(viz, md, "Surface")
+node_builder.apply_ramp_preset(rn, "bnw")
+e_b = gpu_overlay._refresh_viz(viz, md, "Surface")
+if e_h.get("mode") == "heat_lut":
+    check("leftover Style=RGB Surface still uses ramp LUT",
+          e_b.get("mode") == "heat_lut")
+    check("preset does not rebuild mesh batch",
+          e_h.get("batch") is e_b.get("batch"))
+    check("preset updates lut_key",
+          e_h.get("lut_key") != e_b.get("lut_key"),
+          f"{e_h.get('lut_key')} vs {e_b.get('lut_key')}")
+else:
+    c_h, c_b = e_h.get("colors"), e_b.get("colors")
+    check("CPU leftover Style=RGB still recolors via ramp",
+          c_h is not None and c_b is not None and not np.allclose(c_h, c_b),
+          f"mode={e_b.get('mode')}")
+    if c_b is not None and len(c_b) > 1:
+        check("CPU BnW low is black",
+              np.allclose(c_b[0, :3], 0.0, atol=0.08), str(c_b[0]))
+        check("CPU BnW high is white",
+              np.allclose(c_b[-1, :3], 1.0, atol=0.08), str(c_b[-1]))
+
+node_builder.set_input(md, "Attribute", "position")
+gpu_overlay.invalidate(viz)
+e_v = gpu_overlay._refresh_viz(viz, md, "Surface")
+if e_v.get("mode") == "heat_lut":
+    check("vector Surface uses ramp LUT (not leftover Style-RGB)", True)
+else:
+    cols_v = e_v.get("colors")
+    built_v = gpu_sample.build_surface_tris(md, style="RGB")
+    if cols_v is not None and built_v is not None:
+        leftover = gpu_color.rgb_colors(built_v[1])
+        check("vector Surface is not leftover XYZ→RGB",
+              not np.allclose(cols_v[:, :3], leftover[:, :3], atol=1e-3),
+              f"mode={e_v.get('mode')}")
+    else:
+        check("vector Surface CPU produced colors", cols_v is not None)
+
+p_rgb = av._panel_heat_ramp_node(viz, md)
+off_rgb = node_builder.ramp_node_for_viz(viz)
+check("GPU-on panel ramp still off-engine when leftover Style=RGB",
+      p_rgb is not None and off_rgb is not None
+      and p_rgb.as_pointer() == off_rgb.as_pointer())
+
+try:
+    bpy.ops.attrviz.ramp_preset(name=viz.name, preset="rgb")
+    _op_ok, _op_err = True, ""
+except Exception as exc:
+    _op_ok, _op_err = False, str(exc)
+check("ramp_preset operator runs", _op_ok, _op_err)
+check("operator wrote RGB stop count",
+      len(rn.color_ramp.elements) == 5, str(len(rn.color_ramp.elements)))
+node_builder.apply_ramp_preset(rn, "heat")
+
+print("\n== 005: categorical hash (INT / BOOLEAN / INT8) ==")
+check("color_mapper INT is hash", gpu_color.color_mapper("INT") == "hash")
+check("color_mapper BOOLEAN is hash",
+      gpu_color.color_mapper("BOOLEAN") == "hash")
+check("color_mapper FLOAT is ramp", gpu_color.color_mapper("FLOAT") == "ramp")
+check("legend override is ramp",
+      gpu_color.color_mapper("INT", legend=True) == "ramp")
+ids = np.array([0, 0, 1, 2], dtype=np.int32)
+h0 = gpu_color.hash_colors(ids, seed=0)
+h1 = gpu_color.hash_colors(ids, seed=1)
+check("same id → same color", np.allclose(h0[0], h0[1]))
+check("id 0 and 1 differ", not np.allclose(h0[0], h0[2], atol=1e-5))
+check("seed changes palette", not np.allclose(h0, h1))
+ramp_near = gpu_color.ramp_colors(
+    np.array([5.0, 6.0], dtype=np.float32), gpu_color.HEAT_STOPS,
+    vmin=0.0, vmax=10.0,
+)
+hash_near = gpu_color.hash_colors(np.array([5, 6], dtype=np.int32), seed=0)
+check("consecutive ids are not a heat ramp",
+      not np.allclose(hash_near, ramp_near, atol=0.12),
+      f"hash={hash_near} ramp={ramp_near}")
+
+node_builder.set_input(md, "Display", "Surface")
+node_builder.set_input(md, "Attribute", "face_id")
+node_builder.set_input(md, "Domain", "Face")
+viz.attrviz_seed = 0
+gpu_overlay.invalidate(viz)
+e_id = gpu_overlay._refresh_viz(viz, md, "Surface")
+built_id = gpu_sample.build_surface_tris(md)
+if built_id is not None:
+    _bv = np.asarray(built_id[1]).reshape(-1)
+    check("face_id corner values are INT-like",
+          built_id[2] in ("INT", "BOOLEAN", "INT8"), str(built_id[2]))
+    check("face_id corner values not constant",
+          len(np.unique(_bv)) > 1,
+          f"dtype={built_id[2]} unique={np.unique(_bv)[:8]} shape={_bv.shape}")
+check("face_id Surface is not heat_lut",
+      e_id.get("mode") != "heat_lut", str(e_id.get("mode")))
+cols_id = e_id.get("colors")
+if e_id.get("mode") == "id_hash":
+    check("face_id Surface id_hash path", True)
+else:
+    check("face_id Surface produced colors",
+          cols_id is not None and len(cols_id) >= 6,
+          f"mode={e_id.get('mode')} n={0 if cols_id is None else len(cols_id)}")
+    if cols_id is not None and len(cols_id) >= 6:
+        uniq = np.unique(np.round(cols_id, 5), axis=0)
+        check("face_id Surface has multiple hash colors",
+              len(uniq) > 1, f"n_unique={len(uniq)} c0={cols_id[0]}")
+skey0 = e_id.get("sample_key")
+batch0 = e_id.get("batch")
+viz.attrviz_seed = 99
+e_id2 = gpu_overlay._refresh_viz(viz, md, "Surface")
+check("Seed does not bust Surface sample key",
+      e_id2.get("sample_key") == skey0)
+if e_id.get("mode") == "id_hash":
+    check("Seed does not rebuild id_hash batch",
+          e_id2.get("batch") is batch0)
+    check("hash_seed uniform updated",
+          e_id2.get("hash_seed") == 99, str(e_id2.get("hash_seed")))
+else:
+    c2 = e_id2.get("colors")
+    if cols_id is not None and c2 is not None:
+        check("Seed reshuffles face_id colors",
+              not np.allclose(cols_id, c2),
+              f"mode={e_id2.get('mode')}")
+    else:
+        check("Seed reshuffles face_id colors", False, "missing colors")
+
+ramp_still = node_builder.ramp_node_for_viz(viz)
+check("categorical viz still has a ramp tree (future legend)",
+      ramp_still is not None)
+
+node_builder.set_input(md, "Attribute", "heat")
+node_builder.set_input(md, "Domain", "Point")
+viz.attrviz_seed = 0
+gpu_overlay.invalidate(viz)
+e_f = gpu_overlay._refresh_viz(viz, md, "Surface")
+check("float Surface still ramp mapper",
+      e_f.get("mode") == "heat_lut" or e_f.get("colors") is not None,
+      str(e_f.get("mode")))
+
+print("\n== 006: point-only POINTCLOUD + vert mesh ==")
+N_PC = 32
+pc = make_pointcloud("PC006", n=N_PC)
+check("fixture is POINTCLOUD", pc is not None and pc.type == 'POINTCLOUD',
+      f"type={None if pc is None else pc.type}")
+heat_pc = pc.data.attributes.new("heat", 'FLOAT', 'POINT')
+id_pc = pc.data.attributes.new("id", 'INT', 'POINT')
+flow_pc = pc.data.attributes.new("flow", 'FLOAT_VECTOR', 'POINT')
+nv_pc = len(heat_pc.data)
+for i, d in enumerate(heat_pc.data):
+    d.value = i / max(1, nv_pc - 1)
+for i, d in enumerate(id_pc.data):
+    d.value = i % 4
+for i, d in enumerate(flow_pc.data):
+    d.vector = (1.0, 0.0, 0.0)
+bpy.context.view_layer.update()
+check("cloud attr count", nv_pc == N_PC, f"{nv_pc} vs {N_PC}")
+
+r_pc = gpu_sample.sample_evaluated(pc, "heat", "Point", world_space=False)
+check("sample cloud heat", r_pc is not None)
+if r_pc:
+    pos, vals, dt = r_pc
+    check("cloud heat dtype", dt == 'FLOAT', dt)
+    check("cloud heat n", len(pos) == N_PC, f"{len(pos)} vs {N_PC}")
+    check("cloud pos shape", pos.shape == (N_PC, 3), str(pos.shape))
+
+for dom in ("Edge", "Face", "Corner"):
+    r_empty = gpu_sample.sample_evaluated(pc, "heat", dom, world_space=False)
+    check(f"cloud {dom} sample empty", r_empty is None)
+
+r_n = gpu_sample.sample_evaluated(pc, "Normal", "Point", world_space=False)
+check("cloud Normal intrinsic empty", r_n is None)
+
+r_idx = gpu_sample.sample_evaluated(pc, "Index", "Point", world_space=False)
+check("cloud Index intrinsic",
+      r_idx is not None and r_idx[2] == 'INT' and len(r_idx[0]) == N_PC)
+
+pc.location = (10.0, 0.0, 0.0)
+bpy.context.view_layer.update()
+r_w = gpu_sample.sample_evaluated(pc, "heat", "Point", world_space=True)
+r_l = gpu_sample.sample_evaluated(pc, "heat", "Point", world_space=False)
+if r_w and r_l:
+    check("cloud world-space translates",
+          abs(float(r_w[0][0][0] - r_l[0][0][0]) - 10.0) < 1e-4,
+          f"world0={r_w[0][0]} local0={r_l[0][0]}")
+pc.location = (0.0, 0.0, 0.0)
+bpy.context.view_layer.update()
+
+by_pc, faces_pc = av.attributes_by_domain(pc)
+check("cloud has_faces is False", faces_pc is False)
+check("cloud Point attrs include heat",
+      any(n == "heat" for n, _t in by_pc.get("Point", [])))
+check("cloud Edge/Face/Corner empty",
+      not by_pc.get("Edge") and not by_pc.get("Face") and not by_pc.get("Corner"))
+check("cloud Point has Index not Normal",
+      any(n == "Index" for n, _t in by_pc.get("Point", []))
+      and not any(n == "Normal" for n, _t in by_pc.get("Point", [])))
+style_pc, disp_pc = av.auto_pick("Point", "FLOAT", has_faces=False)
+check("cloud auto_pick Markers", disp_pc == "Markers", disp_pc)
+
+for o in list(bpy.context.view_layer.objects):
+    o.select_set(False)
+pc.select_set(True)
+bpy.context.view_layer.objects.active = pc
+cands = av._watch_candidates(bpy.context)
+check("cloud is watch candidate", pc in cands, f"got={[o.name for o in cands]}")
+
+verts = make_vert_mesh("VertOnly006", n=12)
+vh = verts.data.attributes.new("heat", 'FLOAT', 'POINT')
+for i, d in enumerate(vh.data):
+    d.value = i / 11.0
+bpy.context.view_layer.update()
+r_v = gpu_sample.sample_evaluated(verts, "heat", "Point", world_space=False)
+check("vert-only mesh samples", r_v is not None and len(r_v[0]) == 12)
+
+viz_pc = av.add_visualizer(
+    bpy.context, target=pc, attribute="heat",
+    domain="Point", style="Heat", display="Markers",
+)
+md_pc = av.viz_modifier(viz_pc)
+check("cloud viz modifier", md_pc is not None)
+samp = gpu_sample.sample_visualizer_targets(md_pc, cap=50000)
+check("cloud viz sample n",
+      samp is not None and len(samp[0]) == N_PC,
+      str(None if samp is None else len(samp[0])))
+check("watch_has_faces cloud-only False",
+      gpu_sample.watch_has_faces(md_pc) is False)
+
+gpu_overlay.invalidate(viz_pc)
+e_m = gpu_overlay._refresh_viz(viz_pc, md_pc, "Markers")
+check("Markers on cloud heat n",
+      e_m.get("n", 0) == N_PC and not e_m.get("empty"),
+      f"n={e_m.get('n')} empty={e_m.get('empty')} mode={e_m.get('mode')}")
+check("Markers on cloud float is ramp/lut",
+      e_m.get("mode") in ("heat_lut", None) or e_m.get("colors") is not None,
+      str(e_m.get("mode")))
+
+node_builder.set_input(md_pc, "Attribute", "id")
+gpu_overlay.invalidate(viz_pc)
+e_h = gpu_overlay._refresh_viz(viz_pc, md_pc, "Markers")
+check("Markers on cloud int is hash",
+      e_h.get("mode") == "id_hash" or e_h.get("colors") is not None,
+      f"mode={e_h.get('mode')} n={e_h.get('n')}")
+
+node_builder.set_input(md_pc, "Attribute", "flow")
+node_builder.set_input(md_pc, "Display", "Arrows")
+gpu_overlay.invalidate(viz_pc)
+e_a = gpu_overlay._refresh_viz(viz_pc, md_pc, "Arrows")
+check("Arrows on cloud vector non-empty",
+      e_a.get("n", 0) > 0 or e_a.get("cone_verts", 0) > 0,
+      str({k: e_a.get(k) for k in ("n", "empty", "mode", "cone_verts")}))
+
+node_builder.set_input(md_pc, "Attribute", "heat")
+arrow_f = gpu_overlay._refresh_arrows(
+    viz_pc, md_pc, samp[0], samp[1], samp[2])
+check("Arrows on cloud float empty",
+      arrow_f.get("empty") is True or arrow_f.get("batch") is None)
+
+node_builder.set_input(md_pc, "Display", "Surface")
+node_builder.set_input(md_pc, "Attribute", "heat")
+node_builder.set_input(md_pc, "Domain", "Point")
+surf_pc = gpu_sample.build_surface_tris(md_pc, style="Heat")
+check("Surface on cloud-only is empty",
+      surf_pc is None or surf_pc[3] == 0,
+      str(None if surf_pc is None else surf_pc[3]))
+gpu_overlay.invalidate(viz_pc)
+e_s = gpu_overlay._refresh_viz(viz_pc, md_pc, "Surface")
+check("Surface refresh on cloud does not crash",
+      e_s.get("empty") is True or e_s.get("n", 0) == 0,
+      f"empty={e_s.get('empty')} n={e_s.get('n')}")
+
+gpu_overlay.suppress_gn_carriers(bpy.context.scene)
+check("Surface-only does not mute cloud",
+      gpu_overlay._MUTE_PROP not in pc and pc.display_type != "BOUNDS",
+      f"display_type={pc.display_type} muted={gpu_overlay._MUTE_PROP in pc}")
+
+node_builder.set_input(md_pc, "Display", "Tags")
+node_builder.set_input(md_pc, "Attribute", "id")
+gpu_overlay.invalidate(viz_pc)
+rows_t = tags_draw._collect_tags(
+    md_pc, (0.0, -10.0, 2.0), cap=50, facing_cull=False)
+check("Tags on cloud positions",
+      rows_t is not None and len(rows_t) == N_PC,
+      str(None if rows_t is None else len(rows_t)))
+
+# Mixed watch: mesh + cloud, no scene attrvis (API scope=)
+mix = bpy.data.collections.new("Mix006")
+bpy.context.scene.collection.children.link(mix)
+mesh_m = make_grid("MixMesh006", segments=2)
+mh = mesh_m.data.attributes.new("heat", 'FLOAT', 'POINT')
+for d in mh.data:
+    d.value = 0.25
+pc_m = make_pointcloud("MixCloud006", n=8)
+ph = pc_m.data.attributes.new("heat", 'FLOAT', 'POINT')
+for d in ph.data:
+    d.value = 0.75
+bpy.context.view_layer.update()
+mix.objects.link(mesh_m)
+mix.objects.link(pc_m)
+viz_mix = av.add_visualizer(
+    bpy.context, scope=mix, attribute="heat",
+    domain="Point", style="Heat", display="Markers")
+md_mix = av.viz_modifier(viz_mix)
+n_mesh = len(mesh_m.data.vertices)
+n_cloud = len(pc_m.data.points)
+mix_s = gpu_sample.sample_visualizer_targets(md_mix, cap=50000)
+check("mixed mesh+cloud concat",
+      mix_s is not None and len(mix_s[0]) == n_mesh + n_cloud,
+      f"got={None if mix_s is None else len(mix_s[0])} want={n_mesh + n_cloud}")
+check("mixed watch_has_faces True",
+      gpu_sample.watch_has_faces(md_mix) is True)
+
+# Vert-only Surface empty
+viz_v = av.add_visualizer(
+    bpy.context, target=verts, attribute="heat",
+    domain="Point", style="Heat", display="Surface")
+md_v = av.viz_modifier(viz_v)
+surf_v = gpu_sample.build_surface_tris(md_v, style="Heat")
+check("Surface on vert-only mesh empty",
+      surf_v is None or surf_v[3] == 0,
+      str(None if surf_v is None else surf_v[3]))
+
+print("\n== 006 P4: point-cloud mute (Surface analog) ==")
+bpy.context.scene.attrviz_gpu_markers = True
+mesh_p4 = make_grid("P4Mesh", segments=2)
+mh4 = mesh_p4.data.attributes.new("heat", 'FLOAT', 'POINT')
+for d in mh4.data:
+    d.value = 0.5
+pc_p4 = make_pointcloud("P4Cloud", n=8)
+ph4 = pc_p4.data.attributes.new("heat", 'FLOAT', 'POINT')
+for d in ph4.data:
+    d.value = 0.5
+bpy.context.view_layer.update()
+prev_mesh_p4 = mesh_p4.display_type
+prev_pc_p4 = pc_p4.display_type
+
+viz_geo = av.add_visualizer(
+    bpy.context, target=pc_p4, attribute="heat",
+    domain="Point", style="Heat", display="Markers")
+viz_surf_p4 = av.add_visualizer(
+    bpy.context, target=mesh_p4, attribute="heat",
+    domain="Point", style="Heat", display="Surface")
+check("P4 both on: cloud BOUNDS", pc_p4.display_type == "BOUNDS",
+      pc_p4.display_type)
+check("P4 both on: cloud mute prop", gpu_overlay._MUTE_PROP in pc_p4)
+check("P4 both on: mesh BOUNDS", mesh_p4.display_type == "BOUNDS",
+      mesh_p4.display_type)
+
+viz_surf_p4.hide_viewport = True
+gpu_overlay.suppress_gn_carriers(bpy.context.scene)
+check("P4 Markers only: cloud BOUNDS", pc_p4.display_type == "BOUNDS",
+      pc_p4.display_type)
+check("P4 Markers only: mesh restored",
+      mesh_p4.display_type == prev_mesh_p4, mesh_p4.display_type)
+check("P4 mesh+Markers does not mute mesh",
+      mesh_p4.display_type != "BOUNDS" or prev_mesh_p4 == "BOUNDS",
+      mesh_p4.display_type)
+
+viz_surf_p4.hide_viewport = False
+viz_geo.hide_viewport = True
+gpu_overlay.suppress_gn_carriers(bpy.context.scene)
+check("P4 Surface only: mesh BOUNDS", mesh_p4.display_type == "BOUNDS",
+      mesh_p4.display_type)
+check("P4 Surface only: cloud restored",
+      pc_p4.display_type == prev_pc_p4, pc_p4.display_type)
+check("P4 Surface only: cloud prop cleared",
+      gpu_overlay._MUTE_PROP not in pc_p4)
+
+viz_surf_p4.hide_viewport = True
+gpu_overlay.suppress_gn_carriers(bpy.context.scene)
+check("P4 both off: mesh restored",
+      mesh_p4.display_type == prev_mesh_p4, mesh_p4.display_type)
+check("P4 both off: cloud restored",
+      pc_p4.display_type == prev_pc_p4, pc_p4.display_type)
+
+viz_geo.hide_viewport = False
+gpu_overlay.suppress_gn_carriers(bpy.context.scene)
+check("P4 GPU on Markers: cloud BOUNDS", pc_p4.display_type == "BOUNDS",
+      pc_p4.display_type)
+bpy.context.scene.attrviz_gpu_markers = False
+gpu_overlay.suppress_gn_carriers(bpy.context.scene)
+check("P4 GPU off: cloud restored",
+      pc_p4.display_type == prev_pc_p4, pc_p4.display_type)
+bpy.context.scene.attrviz_gpu_markers = True
+gpu_overlay.suppress_gn_carriers(bpy.context.scene)
+check("P4 GPU back on: cloud BOUNDS", pc_p4.display_type == "BOUNDS",
+      pc_p4.display_type)
+
+md_geo = av.viz_modifier(viz_geo)
+node_builder.set_input(md_geo, "Display", "Arrows")
+gpu_overlay.suppress_gn_carriers(bpy.context.scene)
+check("P4 Arrows mutes cloud", pc_p4.display_type == "BOUNDS",
+      pc_p4.display_type)
+node_builder.set_input(md_geo, "Display", "Tags")
+gpu_overlay.suppress_gn_carriers(bpy.context.scene)
+check("P4 Tags mutes cloud", pc_p4.display_type == "BOUNDS",
+      pc_p4.display_type)
+
+viz_geo.hide_viewport = True
+gpu_overlay.suppress_gn_carriers(bpy.context.scene)
+check("P4 disable viz restores cloud",
+      pc_p4.display_type == prev_pc_p4, pc_p4.display_type)
+check("P4 disable viz clears prop", gpu_overlay._MUTE_PROP not in pc_p4)
 
 print(f"\n== Result: {PASS} passed, {FAIL} failed ==")
 if FAIL:

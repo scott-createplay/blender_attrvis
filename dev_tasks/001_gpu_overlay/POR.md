@@ -1,5 +1,11 @@
 # POR: GPU overlay — probe first, then AttrViz display path
 
+> **Frozen (Stage B, 0.5.10).** This POR is the history of how AttrViz got GPU ink.
+> Overlay-type work (Arrows Metal abort, unified geometric cull, kind tag) lives in
+> **[`../002_overlay_kinds/POR.md`](../002_overlay_kinds/POR.md)**.
+> Do not add new Display-leaf sample/cap/upload here. GUI confirm of watch collection /
+> Surface identity / Tags-as-shipped may still close out on this task; do not block 002 P0.
+
 ## Overview
 
 Build a **viewport GPU attribute overlay** for AttrViz: unlit data ink in **Solid** mode, no materials / Material Preview / Workbench Attribute hacks, no beauty-pass pollution.
@@ -27,8 +33,9 @@ If Python draw-handler depth/color cannot meet the bar, **escalate** mid-task to
 
 **Next (ordered):**
 
-1. GUI confirm watch collection (RMB AttrViz tree, multi-select add, coverage readout) + Tags (BLF, spread Cap, Cap 0) + Arrows instancing + Surface identity if not user-signed.  
-2. Deferred: attribute discovery / DistLook / strangler Phase 2 — [`backlog.md`](backlog.md).  
+1. **Overlay kinds (002)** — crash stop + geometric vs surface policy: [`../002_overlay_kinds/POR.md`](../002_overlay_kinds/POR.md).  
+2. GUI confirm (optional closeout): watch collection, Surface identity, Tags-as-shipped if not user-signed.  
+3. Deferred: attribute discovery / DistLook / strangler Phase 2 — [`backlog.md`](backlog.md).  
 
 ---
 

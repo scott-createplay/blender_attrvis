@@ -13,6 +13,7 @@ import numpy as np
 from . import node_builder
 
 WATCH_COLLECTION = "attrvis"
+WATCH_TYPES = frozenset({"MESH", "POINTCLOUD"})
 
 try:
     from . import perf
@@ -38,11 +39,76 @@ def attr_text(val) -> str:
     return str(val)
 
 
-def _evaluated_mesh(obj: bpy.types.Object):
+def is_watchable(obj) -> bool:
+    return obj is not None and getattr(obj, "type", None) in WATCH_TYPES
+
+
+def _geom_has_verts(geom) -> bool:
+    try:
+        return geom is not None and hasattr(geom, "vertices") and len(geom.vertices) > 0
+    except Exception:
+        return False
+
+
+def _is_pointcloud_data(geom) -> bool:
+    return geom is not None and hasattr(geom, "points") and not hasattr(geom, "vertices")
+
+
+def _point_count(geom) -> int:
+    if geom is None:
+        return 0
+    try:
+        return int(geom.attributes.domain_size('POINT'))
+    except Exception:
+        pass
+    if hasattr(geom, "vertices"):
+        return len(geom.vertices)
+    pts = getattr(geom, "points", None)
+    try:
+        return len(pts) if pts is not None else 0
+    except Exception:
+        return 0
+
+
+def _geom_has_points(geom) -> bool:
+    return _is_pointcloud_data(geom) and _point_count(geom) > 0
+
+
+def _evaluated_source(obj: bpy.types.Object):
+    """Evaluated mesh and/or point-cloud components.
+
+    Prefer a mesh with vertices (no same-object mesh+cloud concat). If there
+    is no mesh, take ``evaluated_geometry().pointcloud`` or evaluated
+    PointCloud data. Keep the returned GeometrySet alive while using
+    components taken from it (Blender GC gotcha).
+    """
     deps = bpy.context.evaluated_depsgraph_get()
     ev = obj.evaluated_get(deps)
-    me = getattr(ev, "data", None)
-    if me is None or not hasattr(me, "vertices"):
+    gs = None
+    try:
+        gs = ev.evaluated_geometry()
+    except Exception:
+        pass
+    data = getattr(ev, "data", None)
+    me = data if _geom_has_verts(data) else None
+    if me is None and gs is not None:
+        gs_me = getattr(gs, "mesh", None)
+        if _geom_has_verts(gs_me):
+            me = gs_me
+    pc = None
+    if me is None:
+        if gs is not None:
+            gs_pc = getattr(gs, "pointcloud", None)
+            if _geom_has_points(gs_pc):
+                pc = gs_pc
+        if pc is None and _geom_has_points(data):
+            pc = data
+    return ev, me, pc, gs
+
+
+def _evaluated_mesh(obj: bpy.types.Object):
+    ev, me, _pc, _hold = _evaluated_source(obj)
+    if not _geom_has_verts(me):
         return None, None
     return ev, me
 
@@ -83,6 +149,25 @@ def _point_positions(me) -> np.ndarray:
     cos = np.empty(n * 3, dtype=np.float32)
     me.vertices.foreach_get("co", cos)
     return cos.reshape(-1, 3)
+
+
+def _cloud_positions(pc) -> np.ndarray:
+    n = _point_count(pc)
+    if n == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    cos = np.empty(n * 3, dtype=np.float32)
+    pts = getattr(pc, "points", None)
+    if pts is not None:
+        try:
+            pts.foreach_get("co", cos)
+            return cos.reshape(-1, 3)
+        except Exception:
+            pass
+    attr = pc.attributes.get("position") if hasattr(pc, "attributes") else None
+    if attr is not None:
+        attr.data.foreach_get("vector", cos)
+        return cos.reshape(-1, 3)
+    return np.zeros((0, 3), dtype=np.float32)
 
 
 def _face_centers(me) -> np.ndarray:
@@ -176,6 +261,20 @@ def _read_intrinsic(me, name: str, domain_ui: str, cos=None):
     return None, None
 
 
+def _read_cloud_intrinsic(pc, name: str, cos=None):
+    """Index / Position on a Point Cloud. Normal is empty (no vertex normals)."""
+    n = _point_count(pc)
+    if n == 0:
+        return None, None
+    if name == node_builder.INDEX_ATTR:
+        return np.arange(n, dtype=np.int32), 'INT'
+    if name in (node_builder.POSITION_ATTR, "position"):
+        if cos is None:
+            cos = _cloud_positions(pc)
+        return cos.copy(), 'FLOAT_VECTOR'
+    return None, None
+
+
 def sample_evaluated(
     obj: bpy.types.Object,
     attr: str,
@@ -183,7 +282,7 @@ def sample_evaluated(
     *,
     world_space: bool = True,
 ) -> Optional[SampleResult]:
-    """Sample one mesh object. domain_ui is Point/Edge/Face/Corner."""
+    """Sample one watchable object. domain_ui is Point/Edge/Face/Corner."""
     with _span("sample.evaluated"):
         return _sample_evaluated_impl(
             obj, attr, domain_ui, world_space=world_space,
@@ -200,50 +299,64 @@ def _sample_evaluated_impl(
     domain_ui = domain_ui if domain_ui in node_builder.DOMAINS else "Point"
     blender_dom = node_builder.DOMAIN_TO_BLENDER[domain_ui]
 
-    with _span("sample.depsgraph_mesh"):
-        ev, me = _evaluated_mesh(obj)
-    if me is None:
+    with _span("sample.depsgraph_source"):
+        ev, me, pc, _hold = _evaluated_source(obj)
+
+    if _geom_has_verts(me):
+        with _span(f"sample.positions.{domain_ui}"):
+            if domain_ui == "Point":
+                positions = _point_positions(me)
+            elif domain_ui == "Face":
+                positions = _face_centers(me)
+            elif domain_ui == "Edge":
+                positions = _edge_centers(me)
+            else:
+                positions = _corner_positions(me)
+
+        with _span("sample.read_attr"):
+            if node_builder.is_intrinsic(attr):
+                values, dtype = _read_intrinsic(me, attr, domain_ui, cos=positions)
+            else:
+                values, dtype = _read_attr(me, attr, blender_dom, len(positions))
+        if values is None:
+            return None
+
+        if world_space:
+            with _span("sample.to_world"):
+                if attr == node_builder.NORMAL_ATTR and dtype == 'FLOAT_VECTOR':
+                    nmat = _normal_matrix(ev.matrix_world)
+                    out = np.empty_like(values, dtype=np.float32)
+                    for i in range(len(values)):
+                        out[i] = nmat @ mathutils.Vector(values[i])
+                    values = out
+                positions = _to_world(positions, ev.matrix_world)
+        return positions, values, dtype
+
+    if pc is None or domain_ui != "Point":
         return None
 
-    with _span(f"sample.positions.{domain_ui}"):
-        if domain_ui == "Point":
-            positions = _point_positions(me)
-        elif domain_ui == "Face":
-            positions = _face_centers(me)
-        elif domain_ui == "Edge":
-            positions = _edge_centers(me)
-        else:
-            positions = _corner_positions(me)
-
+    with _span("sample.positions.PointCloud"):
+        positions = _cloud_positions(pc)
     with _span("sample.read_attr"):
         if node_builder.is_intrinsic(attr):
-            values, dtype = _read_intrinsic(me, attr, domain_ui, cos=positions)
+            values, dtype = _read_cloud_intrinsic(pc, attr, cos=positions)
         else:
-            values, dtype = _read_attr(me, attr, blender_dom, len(positions))
+            values, dtype = _read_attr(pc, attr, blender_dom, len(positions))
     if values is None:
         return None
-
-    # Transform normals to world when sampling Normal intrinsic
     if world_space:
         with _span("sample.to_world"):
-            if attr == node_builder.NORMAL_ATTR and dtype == 'FLOAT_VECTOR':
-                nmat = _normal_matrix(ev.matrix_world)
-                out = np.empty_like(values, dtype=np.float32)
-                for i in range(len(values)):
-                    out[i] = nmat @ mathutils.Vector(values[i])
-                values = out
             positions = _to_world(positions, ev.matrix_world)
-
     return positions, values, dtype
 
 
 def iter_watch_meshes(target, scope) -> List[bpy.types.Object]:
-    """Resolve Target object + Scope collection → mesh objects."""
+    """Resolve Target object + Scope collection → watchable objects."""
     seen = set()
     out: List[bpy.types.Object] = []
 
     def add(obj):
-        if obj is None or obj.type != 'MESH':
+        if not is_watchable(obj):
             return
         key = obj.as_pointer()
         if key in seen:
@@ -268,7 +381,7 @@ def scene_watch_collection():
 
 
 def watch_meshes_for_visualizer(md) -> List[bpy.types.Object]:
-    """Meshes this viz should sample.
+    """Watchable objects this viz should sample (meshes and point clouds).
 
     If scene collection ``attrvis`` exists, it is the watch set for every
     visualizer (empty → nothing draws). Otherwise fall back to the
@@ -295,15 +408,30 @@ def watch_fingerprint(md) -> tuple:
         me = getattr(obj, "data", None)
         mw = obj.matrix_world
         tw = tuple(mw[i][j] for i in range(4) for j in range(4))
-        nv = len(me.vertices) if me is not None else 0
-        ne = len(me.edges) if me is not None else 0
-        np_ = len(me.polygons) if me is not None else 0
+        if me is not None and hasattr(me, "vertices"):
+            nv = len(me.vertices)
+            ne = len(me.edges)
+            np_ = len(me.polygons)
+        else:
+            nv = _point_count(me)
+            ne = 0
+            np_ = 0
         parts.append((
             obj.as_pointer(),
             me.as_pointer() if me is not None else 0,
             nv, ne, np_, tw,
         ))
     return tuple(parts)
+
+
+def watch_has_faces(md) -> bool:
+    """True if any watched object has polygons (unevaluated mesh data)."""
+    for obj in watch_meshes_for_visualizer(md):
+        data = getattr(obj, "data", None)
+        polys = getattr(data, "polygons", None)
+        if polys is not None and len(polys) > 0:
+            return True
+    return False
 
 
 def sample_visualizer_targets(
@@ -316,7 +444,7 @@ def sample_visualizer_targets(
 ) -> Optional[SampleResult]:
     """Sample Target∪Scope for a viz modifier; apply density + cap.
 
-    Concatenates all watched meshes. Density uses a stable hash cull
+    Concatenates all watched meshes and point clouds. Density uses a stable hash cull
     (same spirit as GN Random Value < Density).
     """
     with _span("sample.visualizer_targets"):
@@ -469,8 +597,8 @@ def _build_surface_tris_impl(
     n_tris_total = 0
 
     for obj in meshes:
-        ev, me = _evaluated_mesh(obj)
-        if me is None:
+        ev, me, _pc, _hold = _evaluated_source(obj)
+        if not _geom_has_verts(me):
             continue
         try:
             me.calc_loop_triangles()

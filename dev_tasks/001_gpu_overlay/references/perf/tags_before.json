@@ -1,0 +1,185 @@
+{
+  "meta": {
+    "blend": "examples/attrviz_test_cube.blend",
+    "attr": "height",
+    "domain": "Point",
+    "displays": "Tags",
+    "max_targets": 1,
+    "notes": {
+      "targets": [
+        "Attr Cube"
+      ]
+    },
+    "note": "T0 baseline. Cube attr is height (no heat). tags.collect mean ~0.46 ms on this small mesh. Cap still nearest-N at this snapshot.",
+    "role": "tags_before"
+  },
+  "spans": {
+    "harness.add.Tags": {
+      "n": 1,
+      "total_ms": 50.65445898799226,
+      "mean_ms": 50.65445898799226,
+      "min_ms": 50.65445898799226,
+      "max_ms": 50.65445898799226
+    },
+    "harness.cold.Tags": {
+      "n": 1,
+      "total_ms": 1.2780829856637865,
+      "mean_ms": 1.2780829856637865,
+      "min_ms": 1.2780829856637865,
+      "max_ms": 1.2780829856637865
+    },
+    "harness.load_blend": {
+      "n": 1,
+      "total_ms": 4.658000019844621,
+      "mean_ms": 4.658000019844621,
+      "min_ms": 4.658000019844621,
+      "max_ms": 4.658000019844621
+    },
+    "harness.tags_round": {
+      "n": 4,
+      "total_ms": 1.9016259466297925,
+      "mean_ms": 0.4754064866574481,
+      "min_ms": 0.20650000078603625,
+      "max_ms": 1.2717919889837503
+    },
+    "harness.warm.Tags": {
+      "n": 1,
+      "total_ms": 0.6362089770846069,
+      "mean_ms": 0.6362089770846069,
+      "min_ms": 0.6362089770846069,
+      "max_ms": 0.6362089770846069
+    },
+    "sample.depsgraph_mesh": {
+      "n": 4,
+      "total_ms": 0.9049589862115681,
+      "mean_ms": 0.22623974655289203,
+      "min_ms": 0.0018749851733446121,
+      "max_ms": 0.8979580015875399
+    },
+    "sample.evaluated": {
+      "n": 4,
+      "total_ms": 1.034499960951507,
+      "mean_ms": 0.2586249902378768,
+      "min_ms": 0.016874982975423336,
+      "max_ms": 0.9749169985298067
+    },
+    "sample.positions.Point": {
+      "n": 4,
+      "total_ms": 0.030125986086204648,
+      "mean_ms": 0.007531496521551162,
+      "min_ms": 0.004250003257766366,
+      "max_ms": 0.016166974091902375
+    },
+    "sample.read_attr": {
+      "n": 4,
+      "total_ms": 0.01200000406242907,
+      "mean_ms": 0.0030000010156072676,
+      "min_ms": 0.0017909915186464787,
+      "max_ms": 0.005417008651420474
+    },
+    "sample.to_world": {
+      "n": 4,
+      "total_ms": 0.06275001214817166,
+      "mean_ms": 0.015687503037042916,
+      "min_ms": 0.006040994776412845,
+      "max_ms": 0.041292019886896014
+    },
+    "tags.collect": {
+      "n": 4,
+      "total_ms": 1.8510420341044664,
+      "mean_ms": 0.4627605085261166,
+      "min_ms": 0.19454100402072072,
+      "max_ms": 1.2580000038724393
+    }
+  },
+  "ranked_by_total_ms": [
+    {
+      "name": "harness.add.Tags",
+      "n": 1,
+      "total_ms": 50.65445898799226,
+      "mean_ms": 50.65445898799226,
+      "min_ms": 50.65445898799226,
+      "max_ms": 50.65445898799226
+    },
+    {
+      "name": "harness.load_blend",
+      "n": 1,
+      "total_ms": 4.658000019844621,
+      "mean_ms": 4.658000019844621,
+      "min_ms": 4.658000019844621,
+      "max_ms": 4.658000019844621
+    },
+    {
+      "name": "harness.tags_round",
+      "n": 4,
+      "total_ms": 1.9016259466297925,
+      "mean_ms": 0.4754064866574481,
+      "min_ms": 0.20650000078603625,
+      "max_ms": 1.2717919889837503
+    },
+    {
+      "name": "tags.collect",
+      "n": 4,
+      "total_ms": 1.8510420341044664,
+      "mean_ms": 0.4627605085261166,
+      "min_ms": 0.19454100402072072,
+      "max_ms": 1.2580000038724393
+    },
+    {
+      "name": "harness.cold.Tags",
+      "n": 1,
+      "total_ms": 1.2780829856637865,
+      "mean_ms": 1.2780829856637865,
+      "min_ms": 1.2780829856637865,
+      "max_ms": 1.2780829856637865
+    },
+    {
+      "name": "sample.evaluated",
+      "n": 4,
+      "total_ms": 1.034499960951507,
+      "mean_ms": 0.2586249902378768,
+      "min_ms": 0.016874982975423336,
+      "max_ms": 0.9749169985298067
+    },
+    {
+      "name": "sample.depsgraph_mesh",
+      "n": 4,
+      "total_ms": 0.9049589862115681,
+      "mean_ms": 0.22623974655289203,
+      "min_ms": 0.0018749851733446121,
+      "max_ms": 0.8979580015875399
+    },
+    {
+      "name": "harness.warm.Tags",
+      "n": 1,
+      "total_ms": 0.6362089770846069,
+      "mean_ms": 0.6362089770846069,
+      "min_ms": 0.6362089770846069,
+      "max_ms": 0.6362089770846069
+    },
+    {
+      "name": "sample.to_world",
+      "n": 4,
+      "total_ms": 0.06275001214817166,
+      "mean_ms": 0.015687503037042916,
+      "min_ms": 0.006040994776412845,
+      "max_ms": 0.041292019886896014
+    },
+    {
+      "name": "sample.positions.Point",
+      "n": 4,
+      "total_ms": 0.030125986086204648,
+      "mean_ms": 0.007531496521551162,
+      "min_ms": 0.004250003257766366,
+      "max_ms": 0.016166974091902375
+    },
+    {
+      "name": "sample.read_attr",
+      "n": 4,
+      "total_ms": 0.01200000406242907,
+      "mean_ms": 0.0030000010156072676,
+      "min_ms": 0.0017909915186464787,
+      "max_ms": 0.005417008651420474
+    }
+  ]
+}
