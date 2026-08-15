@@ -365,6 +365,46 @@ check("V16c Surface Heat EEVEE pixels are lit (not black)",
       rmax > 0.1, f"max={rmax:.4f}")
 pix_viz.hide_render = True
 
+print("\n== V17: engine group builds complete on this Blender ==")
+from attrviz import node_builder as nb  # noqa: E402
+
+# Guards a whole class of Blender-version breakage: a renamed socket
+# identifier kills the builder mid-tree, and the half-built group is then
+# cached and reused, so the real error resurfaces as a confusing KeyError
+# from set_input further downstream (5.0.x A_STR/B_STR vs 5.2 A/B).
+eng = nb.ensure_viz_group(force=True)
+eng_in = {i.name for i in eng.interface.items_tree
+          if i.item_type == 'SOCKET' and i.in_out == 'INPUT'}
+_want = {"Target", "Scope", "Attribute", "Domain", "Style", "Display"}
+check("V17a engine group has every control socket",
+      _want <= eng_in, f"missing={sorted(_want - eng_in)}")
+check("V17b completed build carries the version stamp",
+      eng.get("attrviz_version") == nb.VERSION,
+      f"stamp={eng.get('attrviz_version')!r}")
+
+# FunctionNodeCompare STRING inputs: A/B on 5.2, A_STR/B_STR on 5.0.x.
+_probe = bpy.data.node_groups.new("attrviz_cmp_probe", "GeometryNodeTree")
+_cmp = _probe.nodes.new("FunctionNodeCompare")
+_cmp.data_type = 'STRING'
+_cmp.operation = 'EQUAL'
+try:
+    nb._sock_by_id(_cmp, "A", "A_STR")
+    nb._sock_by_id(_cmp, "B", "B_STR")
+    check("V17c compare STRING sockets resolve on this Blender", True)
+except KeyError as exc:  # noqa: BLE001
+    check("V17c compare STRING sockets resolve on this Blender", False,
+          f"KeyError {exc} — inputs={[s.identifier for s in _cmp.inputs]}")
+bpy.data.node_groups.remove(_probe)
+
+# An unstamped group is a failed build: rebuild it, never hand it back.
+del eng["attrviz_version"]
+_again = nb.ensure_viz_group(force=False)
+_again_in = {i.name for i in _again.interface.items_tree
+             if i.item_type == 'SOCKET' and i.in_out == 'INPUT'}
+check("V17d unstamped (half-built) group is rebuilt, not reused",
+      _again.get("attrviz_version") == nb.VERSION and "Style" in _again_in,
+      f"stamp={_again.get('attrviz_version')!r} n_in={len(_again_in)}")
+
 print("\n== V8: registry + register/unregister smoke ==")
 n_viz = len(av.visualizers(bpy.context.scene))
 check("V8a visualizers registry lists all entries",

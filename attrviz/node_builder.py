@@ -14,7 +14,7 @@ Axes (Index Switch ints — Menu sockets break on 5.0 modifier ID-props):
 """
 import bpy
 
-VERSION = "0.5.10"
+VERSION = "0.5.11"
 ENGINE_NAME = "AttrViz Engine"
 # Baked on mesh before Mesh to Points — Input Normal is (0,0,0) on points.
 AV_NORMAL_ATTR = ".attrviz_normal"
@@ -207,10 +207,19 @@ def _link(tree, a, b):
     tree.links.new(a, b)
 
 
-def _sock_by_id(node, identifier):
-    for s in node.inputs:
-        if s.identifier == identifier:
-            return s
+def _sock_by_id(node, identifier, *fallbacks):
+    """Input socket by identifier; try `fallbacks` in order if absent.
+
+    Blender 5.2 collapsed FunctionNodeCompare's per-type input sockets
+    (A_STR / A_INT / A_VEC3 / …) into one dynamic A / B pair. 5.0.x used
+    the suffixed spelling. Ask for the current name first and fall back to
+    the legacy one so a single build works on both — the suffixed sockets
+    never existed on 5.2, so leading with A is the safe order.
+    """
+    for ident in (identifier,) + fallbacks:
+        for s in node.inputs:
+            if s.identifier == ident:
+                return s
     raise KeyError(identifier)
 
 
@@ -218,8 +227,8 @@ def _str_eq(tree, x, y, a_out, literal):
     """Attribute-string equality → boolean."""
     cmp = _n(tree, "FunctionNodeCompare", x, y,
              data_type='STRING', operation='EQUAL')
-    _link(tree, a_out, _sock_by_id(cmp, "A_STR"))
-    _sock_by_id(cmp, "B_STR").default_value = literal
+    _link(tree, a_out, _sock_by_id(cmp, "A", "A_STR"))
+    _sock_by_id(cmp, "B", "B_STR").default_value = literal
     return cmp.outputs["Result"]
 
 
@@ -394,7 +403,12 @@ def ensure_viz_material(name=VIZ_MATERIAL_NAME, force=False):
 def ensure_viz_group(force=False):
     name = f"{ENGINE_NAME} {VERSION}"
     existing = bpy.data.node_groups.get(name)
-    if existing is not None and not force:
+    # Reuse only a COMPLETE build. The version stamp is written last, so a
+    # group missing it died mid-build (e.g. a renamed socket identifier on a
+    # newer Blender) and is missing sockets. Reusing one turns the real error
+    # into a confusing KeyError from set_input further downstream.
+    if (existing is not None and not force
+            and existing.get("attrviz_version") == VERSION):
         return existing
     t = _tree(name)
     _sock(t, "Geometry", "OUTPUT", "NodeSocketGeometry")
