@@ -1,0 +1,13 @@
+GPU overlay vs GN path — marginal cost per scrub tick
+Blender 5.2.0 LTS · AttrViz 0.5.11 · 2026-08-15
+Harness: ../../tests/bench_invalidation.py (synthetic dense grid + Set Position)
+
+Baseline = same scene, no visualizer. Marginal = total - baseline.
+Compute only: excludes the overlay's build_batch upload and Blender's
+drawing of the GN result. 'distinct' must be n/n or the scrub was a no-op.
+
+    verts |   baseline |   GPU total |    GN total |  GPU marg. |   GN marg. | winner    | distinct
+    40000 |      1.0ms |       2.2ms |      14.7ms |      1.2ms |     13.6ms | GPU 11.4x | 4/4
+   160000 |      1.8ms |       7.1ms |      62.4ms |      5.3ms |     60.6ms | GPU 11.4x | 4/4
+   490000 |      4.7ms |      18.4ms |     189.1ms |     13.8ms |    184.4ms | GPU 13.4x | 4/4
+  1000000 |      6.1ms |      36.8ms |     385.8ms |     30.7ms |    379.6ms | GPU 12.4x | 4/4
