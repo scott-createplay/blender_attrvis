@@ -1082,6 +1082,119 @@ check("008 empty mesh: corner positions",
       len(gpu_sample._corner_positions(_empty)) == 0)
 check("008 empty mesh: face centers", len(gpu_sample._face_centers(_empty)) == 0)
 
+print("\n== 008 P0: depsgraph epochs invalidate the sample cache ==")
+# Every row here used to leave the fingerprint untouched, so the overlay kept
+# drawing the first frame it ever sampled.
+_p0_me = bpy.data.meshes.new("P0Grid")
+_pb = _bm.new()
+_bm.ops.create_grid(_pb, x_segments=4, y_segments=4, size=1.0)
+_pb.to_mesh(_p0_me)
+_pb.free()
+_p0_obj = bpy.data.objects.new("P0Grid", _p0_me)
+bpy.context.collection.objects.link(_p0_obj)
+_p0_attr = _p0_me.attributes.new("heat", 'FLOAT', 'POINT')
+for _i, _d in enumerate(_p0_attr.data):
+    _d.value = float(_i)
+
+_p0_viz = av.add_visualizer(bpy.context, target=_p0_obj, attribute="heat",
+                            domain="Point", style="Heat", display="Markers")
+_p0_md = av.viz_modifier(_p0_viz)
+
+
+def _cook_fp():
+    """Settle the depsgraph so handlers run, then read the fingerprint."""
+    bpy.context.view_layer.update()
+    _d = bpy.context.evaluated_depsgraph_get()
+    _d.update()
+    return gpu_sample.watch_fingerprint(_p0_md)
+
+
+_fp = _cook_fp()
+
+for _i, _d in enumerate(_p0_me.attributes["heat"].data):
+    _d.value = float(_i) * 10.0
+_p0_obj.update_tag()
+_fp_attr = _cook_fp()
+check("008 P0 attribute value change moves the fingerprint", _fp_attr != _fp)
+
+for _v in _p0_me.vertices:
+    _v.co.z += 1.0
+_p0_obj.update_tag()
+_fp_pos = _cook_fp()
+check("008 P0 vertex move moves the fingerprint", _fp_pos != _fp_attr)
+
+_p0_obj.location.x += 2.0
+_fp_xf = _cook_fp()
+check("008 P0 transform moves the fingerprint", _fp_xf != _fp_pos)
+
+# The case that proves counts were never the signal: a GN modifier that
+# changes the evaluated element count, like a scatter reseeding.
+_p0_tree = bpy.data.node_groups.new("P0GN", "GeometryNodeTree")
+_p0_tree.interface.new_socket("Geometry", in_out='INPUT',
+                              socket_type="NodeSocketGeometry")
+_p0_tree.interface.new_socket("Geometry", in_out='OUTPUT',
+                              socket_type="NodeSocketGeometry")
+_p0_gi = _p0_tree.nodes.new("NodeGroupInput")
+_p0_go = _p0_tree.nodes.new("NodeGroupOutput")
+_p0_grid = _p0_tree.nodes.new("GeometryNodeMeshGrid")
+_p0_grid.inputs["Vertices X"].default_value = 5
+_p0_grid.inputs["Vertices Y"].default_value = 5
+# The grid replaces the original geometry, so heat must be re-stored or the
+# visualizer has nothing to sample.
+_p0_store = _p0_tree.nodes.new("GeometryNodeStoreNamedAttribute")
+_p0_store.data_type = 'FLOAT'
+_p0_store.domain = 'POINT'
+_p0_store.inputs["Name"].default_value = "heat"
+_p0_idx = _p0_tree.nodes.new("GeometryNodeInputIndex")
+_p0_tree.links.new(_p0_grid.outputs["Mesh"], _p0_store.inputs["Geometry"])
+_p0_tree.links.new(_p0_idx.outputs["Index"], _p0_store.inputs["Value"])
+_p0_tree.links.new(_p0_store.outputs["Geometry"], _p0_go.inputs[0])
+_p0_gmd = _p0_obj.modifiers.new("gn", 'NODES')
+_p0_gmd.node_group = _p0_tree
+_fp_mod = _cook_fp()
+check("008 P0 adding a GN modifier moves the fingerprint", _fp_mod != _fp_xf)
+
+_n_before = len(gpu_sample.sample_visualizer_targets(_p0_md)[0])
+_p0_grid.inputs["Vertices X"].default_value = 9
+_p0_obj.update_tag()
+_fp_count = _cook_fp()
+_n_after = len(gpu_sample.sample_visualizer_targets(_p0_md)[0])
+check("008 P0 evaluated element count change moves the fingerprint",
+      _fp_count != _fp_mod, f"{_n_before} -> {_n_after}")
+check("008 P0 sample really did change length", _n_before != _n_after,
+      f"{_n_before} -> {_n_after}")
+
+# Non-regressions: idle redraws and unrelated objects must still cache.
+_fp_idle_a = _cook_fp()
+_fp_idle_b = _cook_fp()
+check("008 P0 no change => fingerprint stable (orbit still caches)",
+      _fp_idle_a == _fp_idle_b)
+
+_other = bpy.data.objects.new("P0Unrelated", bpy.data.meshes.new("P0Un"))
+bpy.context.collection.objects.link(_other)
+_fp_pre_other = _cook_fp()
+_other.location.z += 5.0
+_fp_post_other = _cook_fp()
+check("008 P0 unrelated object change does NOT invalidate this viz",
+      _fp_pre_other == _fp_post_other)
+
+# Frame changes fire no depsgraph update at all, so they need their own bump.
+_fp_pre_frame = _cook_fp()
+bpy.context.scene.frame_set(bpy.context.scene.frame_current + 1)
+_fp_post_frame = _cook_fp()
+check("008 P0 frame change invalidates (animated sources)",
+      _fp_pre_frame != _fp_post_frame)
+
+# Handlers must actually be installed, or none of the above holds in a real
+# session (the tests above drive the depsgraph directly).
+check("008 P0 depsgraph handler registered",
+      av._note_depsgraph_epochs in bpy.app.handlers.depsgraph_update_post)
+check("008 P0 frame handler registered",
+      av._note_frame_change in bpy.app.handlers.frame_change_post)
+check("008 P0 epoch handler runs before vizcol sync",
+      bpy.app.handlers.depsgraph_update_post.index(av._note_depsgraph_epochs)
+      < bpy.app.handlers.depsgraph_update_post.index(av._sync_vizcol_active))
+
 print(f"\n== Result: {PASS} passed, {FAIL} failed ==")
 if FAIL:
     sys.exit(1)

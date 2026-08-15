@@ -1278,6 +1278,30 @@ def _set_enabled(self, value):
 
 
 @persistent
+def _note_depsgraph_epochs(scene, depsgraph):
+    """Record which watched objects the depsgraph says changed.
+
+    Kept separate from _sync_vizcol_active and registered FIRST: this is the
+    overlay's only correct invalidation signal, and it must not be skipped
+    because some unrelated vizcol sync raised.
+    """
+    try:
+        gpu_sample.note_depsgraph_updates(depsgraph)
+    except Exception:
+        pass
+
+
+@persistent
+def _note_frame_change(scene, depsgraph=None):
+    """Frame changes do not fire depsgraph_update_post at all (measured on
+    5.2), so animated sources need this second signal or they go stale."""
+    try:
+        gpu_sample.note_frame_change()
+    except Exception:
+        pass
+
+
+@persistent
 def _sync_vizcol_active(scene, depsgraph):
     """Workbench Attribute shading needs active Color Attribute on eval mesh."""
     try:
@@ -1321,6 +1345,11 @@ def _sync_vizcol_active(scene, depsgraph):
 def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
+    # Epoch bump goes first — invalidation must not depend on anything after it.
+    if _note_depsgraph_epochs not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.insert(0, _note_depsgraph_epochs)
+    if _note_frame_change not in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.append(_note_frame_change)
     if _sync_vizcol_active not in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.append(_sync_vizcol_active)
     bpy.types.Object.attrviz_ui_expand = bpy.props.BoolProperty(
@@ -1378,6 +1407,10 @@ def unregister():
     tags_draw.unregister()
     if _sync_vizcol_active in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(_sync_vizcol_active)
+    if _note_depsgraph_epochs in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(_note_depsgraph_epochs)
+    if _note_frame_change in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.remove(_note_frame_change)
     bpy.types.VIEW3D_MT_object_context_menu.remove(_context_menu)
     for attr in ("attrviz_ui_expand", "attrviz_enabled", "attrviz_domain",
                  "attrviz_style", "attrviz_display", "attrviz_seed"):

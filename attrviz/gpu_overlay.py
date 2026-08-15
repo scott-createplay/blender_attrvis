@@ -328,6 +328,12 @@ def _on_load_post(_dummy):
     _rebuild_muted_ptrs()
     invalidate_all()
     try:
+        # Epochs are keyed on datablock pointers — meaningless across files,
+        # and a reused pointer could mask a change.
+        gpu_sample.reset_epochs()
+    except Exception:
+        pass
+    try:
         from . import tags_draw
         tags_draw.invalidate_cache()
     except Exception:

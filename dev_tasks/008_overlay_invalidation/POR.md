@@ -89,14 +89,31 @@ Correct-but-slow beats fast-but-lying: a stale visualizer is silently wrong, whi
 
 ## Progressive plan
 
-### P0 — Correctness
+### P0 — Correctness ✅
 
-- [ ] `depsgraph_update_post` handler bumping a per-object epoch on `is_updated_geometry` / `is_updated_transform`. Must be cheap — it fires constantly.
-- [ ] Fold the epoch into `watch_fingerprint`; drop the count/matrix terms, keep watch-set identity.
-- [ ] Probe **edit mode**: the original mesh is not committed until exit, so confirm which update the evaluated object actually fires and whether the epoch moves. Do not assume.
-- [ ] Probe **animated / frame-change** sources: confirm they arrive through the same handler, or add `frame_change_post`.
-- [ ] Handler must be `@persistent` and registered/unregistered alongside the existing handlers.
-- [ ] Tests: each row of the "Change to the watched object" table above flips from stale to fresh; the `mock_city` seed scrub resamples with the new element count.
+Probed first on 5.2 — which signal actually reports what:
+
+| Change | `depsgraph_update_post` | flag |
+|---|---|---|
+| attribute values | fires | geometry |
+| vertex move | fires | geometry |
+| GN modifier input (the seed scrub) | fires | geometry |
+| object transform | fires | transform |
+| **edit-mode vertex move, while IN edit mode** | fires | geometry |
+| **frame change on an animated source** | **never fires (0×)** | — |
+
+Edit mode needed no special handling. Frame change did: geometry genuinely moves (Z 7.458 → 1.029) while `depsgraph_update_post` does not fire at all, so only `frame_change_post` sees it.
+
+- [x] `_note_depsgraph_epochs` — `@persistent depsgraph_update_post`, bumps a per-object epoch on `is_updated_geometry` / `is_updated_transform`. Reads flags only; no evaluation.
+- [x] `_note_frame_change` — `@persistent frame_change_post`, bumps **one scene epoch**. `frame_change_post` carries no per-object update list, so invalidating everything is the honest option rather than guessing which animated object moved.
+- [x] Epochs key on `obj.original.as_pointer()` — depsgraph updates can report the *evaluated* copy while watch sets hold originals, so raw pointers would never match.
+- [x] `watch_fingerprint` reduced to `(scene_epoch, [(obj_ptr, data_ptr, epoch), …])`. Counts and `matrix_world` gone.
+- [x] Registered with `insert(0, …)`, ahead of `_sync_vizcol_active`: invalidation must not be skippable because an unrelated vizcol sync raised. Test asserts the ordering.
+- [x] `reset_epochs()` on `load_post` — pointers are meaningless across files, and a *reused* pointer could mask a change.
+- [x] Tests (12): every row above flips stale → fresh; an evaluated element-count change invalidates; **non-regressions** — no-change keeps the fingerprint stable (orbit still caches) and an unrelated object changing does not invalidate; handlers registered and correctly ordered.
+- [x] `mock_city` seed scrub confirmed end to end: 264 → 184 buildings, `FINGERPRINT CHANGED: True`.
+
+Cost after P0: 1M scrub tick ~22.7 ms marginal (from 14.5 ms — this is correctness arriving), still below the 30.7 ms it cost before P2. Whether P1's throttle is needed is now a question for real scenes.
 
 ### P1 — Interactive throttle
 

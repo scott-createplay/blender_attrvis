@@ -470,30 +470,79 @@ def watch_meshes_for_visualizer(md) -> List[bpy.types.Object]:
     return iter_watch_meshes(target, scope)
 
 
-def watch_fingerprint(md) -> tuple:
-    """Cheap watch-set topology + transform signature (no attr read).
+# ── change detection ────────────────────────────────────────────────
+#
+# The overlay draws from a Python-side snapshot, which lives outside the
+# dependency graph, so it has to reconstruct the dirty signal the graph
+# already computes. Counting elements off the ORIGINAL mesh (what this used
+# to do) cannot see any of it: a GN scatter can drop a building and the
+# counts never move, because they describe pre-modifier data.
+#
+# Measured on 5.2 — which signal actually reports what:
+#
+#   attribute values / vertex move / GN input   depsgraph_update_post, geometry
+#   object transform                            depsgraph_update_post, transform
+#   edit-mode vertex move (while IN edit mode)  depsgraph_update_post, geometry
+#   frame change on an animated source          NOTHING — depsgraph_update_post
+#                                               does not fire at all
+#
+# Hence two counters. Per-object epochs where the graph tells us which
+# object changed, and one scene epoch for frame changes, where it does not:
+# frame_change_post carries no per-object update list, so the honest move is
+# to invalidate everything rather than guess.
+_epochs: dict = {}
+_scene_epoch: int = 0
 
-    Used by the GPU overlay to decide cache hits *before* sampling.
+
+def _epoch_key(obj) -> int:
+    """Pointer of the ORIGINAL datablock — depsgraph updates may report the
+    evaluated copy, while watch sets always hold originals."""
+    return getattr(obj, "original", obj).as_pointer()
+
+
+def note_depsgraph_updates(depsgraph) -> None:
+    """Bump the epoch of every object the graph says changed. Hot path —
+    this runs on every depsgraph update, so it only reads flags."""
+    for update in depsgraph.updates:
+        idb = update.id
+        if not isinstance(idb, bpy.types.Object):
+            continue
+        if update.is_updated_geometry or update.is_updated_transform:
+            key = _epoch_key(idb)
+            _epochs[key] = _epochs.get(key, 0) + 1
+
+
+def note_frame_change() -> None:
+    global _scene_epoch
+    _scene_epoch += 1
+
+
+def reset_epochs() -> None:
+    """File load: pointers are meaningless across files, and a reused
+    pointer could otherwise mask a change."""
+    global _scene_epoch
+    _epochs.clear()
+    _scene_epoch += 1
+
+
+def watch_fingerprint(md) -> tuple:
+    """Watch-set identity + change epochs. No geometry read, no counts.
+
+    Identity (which objects, which datablocks) still belongs here: adding or
+    removing a target need not fire a geometry update on anything. Element
+    counts and matrix_world do not — they were a walk of every watched mesh
+    on every redraw, and the epochs supersede them.
     """
     parts = []
     for obj in watch_meshes_for_visualizer(md):
         me = getattr(obj, "data", None)
-        mw = obj.matrix_world
-        tw = tuple(mw[i][j] for i in range(4) for j in range(4))
-        if me is not None and hasattr(me, "vertices"):
-            nv = len(me.vertices)
-            ne = len(me.edges)
-            np_ = len(me.polygons)
-        else:
-            nv = _point_count(me)
-            ne = 0
-            np_ = 0
+        key = _epoch_key(obj)
         parts.append((
-            obj.as_pointer(),
+            key,
             me.as_pointer() if me is not None else 0,
-            nv, ne, np_, tw,
+            _epochs.get(key, 0),
         ))
-    return tuple(parts)
+    return (_scene_epoch, tuple(parts))
 
 
 def watch_has_faces(md) -> bool:
