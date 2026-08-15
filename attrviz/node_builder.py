@@ -52,12 +52,129 @@ M2P_MODE = {
     "Corner": 'CORNERS',
 }
 
-# heat ramp: blue -> cyan -> green -> yellow -> red
+# ColorRamp presets — stop-lists that fill the per-viz ramp (not Styles).
 HEAT = ((0.0, (0.05, 0.12, 0.90, 1.0)),
         (0.25, (0.00, 0.80, 0.90, 1.0)),
         (0.5, (0.10, 0.85, 0.20, 1.0)),
         (0.75, (0.95, 0.85, 0.10, 1.0)),
         (1.0, (0.95, 0.10, 0.05, 1.0)))
+RGB = ((0.0, (0.90, 0.12, 0.10, 1.0)),
+       (0.25, (0.95, 0.85, 0.10, 1.0)),
+       (0.5, (0.10, 0.85, 0.20, 1.0)),
+       (0.75, (0.00, 0.80, 0.90, 1.0)),
+       (1.0, (0.15, 0.20, 0.95, 1.0)))
+BNW = ((0.0, (0.0, 0.0, 0.0, 1.0)),
+       (1.0, (1.0, 1.0, 1.0, 1.0)))
+RAMP_PRESETS = {"heat": HEAT, "rgb": RGB, "bnw": BNW}
+
+# Per-viz ColorRamp lives off the engine tree (never a modifier).
+RAMP_PROP = "attrviz_ramp_tree"
+RAMP_MARKER = "attrviz_ramp"
+RAMP_NODE_NAME = "Heat Ramp"
+
+
+def apply_ramp_stops(ramp_node, stops):
+    """Replace a ValToRGB ColorRamp with ``stops`` ((pos, rgba), ...).
+
+    Always resets (does not accumulate). Needs at least two stops.
+    """
+    rows = []
+    for row in stops:
+        pos = float(row[0])
+        rest = row[1]
+        if isinstance(rest, (list, tuple)):
+            rgba = tuple(float(c) for c in rest[:4])
+        else:
+            rgba = tuple(float(c) for c in row[1:5])
+        if len(rgba) < 4:
+            rgba = rgba + (1.0,) * (4 - len(rgba))
+        rows.append((pos, rgba))
+    if len(rows) < 2:
+        raise ValueError("ramp needs at least 2 stops")
+    elems = ramp_node.color_ramp.elements
+    while len(elems) > 2:
+        elems.remove(elems[len(elems) - 1])
+    elems[0].position = 0.0
+    elems[1].position = 1.0
+    elems[0].color = rows[0][1]
+    elems[1].color = rows[-1][1]
+    elems[0].position = rows[0][0]
+    elems[1].position = rows[-1][0]
+    for pos, col in rows[1:-1]:
+        e = elems.new(pos)
+        e.color = col
+
+
+def apply_heat_stops(ramp_node):
+    """Seed a ValToRGB with the default Heat 5-stop."""
+    apply_ramp_stops(ramp_node, HEAT)
+
+
+def apply_ramp_preset(ramp_node, preset: str):
+    """Write a named preset (heat / rgb / bnw) into the ColorRamp."""
+    key = (preset or "heat").strip().lower()
+    stops = RAMP_PRESETS.get(key)
+    if stops is None:
+        raise KeyError(f"unknown ramp preset {preset!r}")
+    apply_ramp_stops(ramp_node, stops)
+    return key
+
+
+def ramp_tree_for_viz(obj):
+    """Return the off-engine ramp node tree, or None."""
+    if obj is None:
+        return None
+    tree = obj.get(RAMP_PROP)
+    if isinstance(tree, bpy.types.NodeTree) and tree.get(RAMP_MARKER):
+        return tree
+    return None
+
+
+def ramp_node_for_viz(obj):
+    """Return the viz's ShaderNodeValToRGB, or None."""
+    tree = ramp_tree_for_viz(obj)
+    if tree is None:
+        return None
+    return tree.nodes.get(RAMP_NODE_NAME)
+
+
+def ensure_viz_ramp(obj):
+    """Per-viz ColorRamp node tree — never assigned as a modifier.
+
+    GPU overlay (and the panel widget) read this tree. Editing it does
+    not dirty ``ensure_viz_group()``. Idempotent; seeds Heat on first create.
+    """
+    tree = ramp_tree_for_viz(obj)
+    if tree is None:
+        label = getattr(obj, "name", None) or "viz"
+        tree = bpy.data.node_groups.new(
+            f"AttrViz Ramp · {label}", "GeometryNodeTree",
+        )
+        tree[RAMP_MARKER] = True
+        obj[RAMP_PROP] = tree
+    node = tree.nodes.get(RAMP_NODE_NAME)
+    if node is None:
+        node = tree.nodes.new("ShaderNodeValToRGB")
+        node.name = RAMP_NODE_NAME
+        node.label = "Heat Ramp"
+        apply_heat_stops(node)
+    return node
+
+
+def release_viz_ramp(obj):
+    """Drop the viz's ramp tree if nothing else uses it."""
+    tree = ramp_tree_for_viz(obj)
+    if tree is None:
+        return
+    try:
+        del obj[RAMP_PROP]
+    except Exception:
+        pass
+    if tree.users == 0:
+        try:
+            bpy.data.node_groups.remove(tree)
+        except Exception:
+            pass
 
 
 def _tree(name):
@@ -464,12 +581,7 @@ def ensure_viz_group(force=False):
     ramp = _n(t, "ShaderNodeValToRGB", 420, -180)
     ramp.name = "Heat Ramp"
     ramp.label = "Heat Ramp"
-    elems = ramp.color_ramp.elements
-    elems[0].position, elems[0].color = HEAT[0]
-    elems[1].position, elems[1].color = HEAT[-1]
-    for pos, col in HEAT[1:-1]:
-        e = elems.new(pos)
-        e.color = col
+    apply_heat_stops(ramp)
     _link(t, nrm.outputs["Result"], ramp.inputs["Fac"])
 
     style, style_in = _menu_switch(t, 560, -260, 'RGBA', "Style",

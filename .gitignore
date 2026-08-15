@@ -2,4 +2,5 @@ __pycache__/
 build/
 *.blend
 *.blend1
+!examples/*.blend
 renders/

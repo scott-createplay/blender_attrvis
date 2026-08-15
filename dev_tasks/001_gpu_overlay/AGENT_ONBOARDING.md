@@ -1,8 +1,9 @@
 # Agent onboarding — GPU overlay (task 001)
 
-**Status: Stage B — Markers + Arrows GPU user-verified; Tags/Surface open**
+**Status: Frozen Stage B (0.5.10).** Do not start probe/Stage B work from this file.
 
-**Source of truth:** [`POR.md`](POR.md)
+**New overlay work:** [`../002_overlay_kinds/AGENT_ONBOARDING.md`](../002_overlay_kinds/AGENT_ONBOARDING.md)  
+**This task (history):** [`POR.md`](POR.md)
 
 ---
 

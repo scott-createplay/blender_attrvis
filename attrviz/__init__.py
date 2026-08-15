@@ -5,7 +5,7 @@ Houdini's visualizer model on native constructs (POR 005):
   collection — the outliner is the registry UI; Enabled / viewport
   eye toggles draw (no compositing of overlapping viz);
 - Domain localizes the read (Point / Edge / Face / Corner);
-- Color maps the value (Heat / RGB / Random); Type chooses carriers
+- ColorRamp maps the value (Heat / RGB / BnW presets); Type chooses carriers
   (Markers / Surface / Arrows);
 - GN pulls evaluated geometry through the depsgraph — zero mutation;
 - Display-only: emission material reads vizcol (Workbench cannot color
@@ -20,6 +20,7 @@ from . import node_builder
 from . import tags_draw
 from . import gpu_overlay
 from . import gpu_sample
+from . import gpu_color
 
 VIZ_COLLECTION = "Visualizers"
 WATCH_COLLECTION = gpu_sample.WATCH_COLLECTION
@@ -57,7 +58,7 @@ def _ensure_watch_collection(context):
 
 
 def _watch_candidates(context):
-    """Selected ∪ active MESH objects, excluding viz carriers."""
+    """Selected ∪ active MESH / POINTCLOUD objects, excluding viz carriers."""
     seen = set()
     out = []
     objs = list(getattr(context, "selected_objects", None) or [])
@@ -65,7 +66,7 @@ def _watch_candidates(context):
     if active is not None and active not in objs:
         objs.append(active)
     for obj in objs:
-        if obj is None or obj.type != 'MESH' or is_visualizer(obj):
+        if obj is None or obj.type not in gpu_sample.WATCH_TYPES or is_visualizer(obj):
             continue
         key = obj.as_pointer()
         if key in seen:
@@ -292,12 +293,11 @@ def _assign_viz_engine(md, label, scene=None):
     """Bind AttrViz engine tree to a Nodes modifier.
 
     GPU Overlay on (default): share one ``ensure_viz_group()`` datablock —
-    config lives on modifier sockets, not a per-viz deep copy.
+    config lives on modifier sockets, not a per-viz deep copy. Heat
+    ColorRamp lives off-engine via ``ensure_viz_ramp`` (task 003).
 
     GPU Overlay off: keep an isolated ``.copy()`` so materials-path Heat
-    ColorRamp stays per-viz until ramp ownership is solved (Phase 2/4).
-
-    Phase 4: delete the copy branch once GPU registry / ramp policy lands.
+    ColorRamp stays per-viz until that path is wired to the off-engine ramp.
     """
     engine = node_builder.ensure_viz_group(force=False)
     if _gpu_overlay_on(scene):
@@ -388,6 +388,7 @@ def migrate_all_visualizers(scene=None):
     for obj in visualizers(scene):
         try:
             _ensure_display_only_flags(obj)
+            node_builder.ensure_viz_ramp(obj)
             if _migrate_visualizer(obj):
                 n += 1
         except Exception:
@@ -408,6 +409,7 @@ def add_visualizer(context, target=None, scope=None,
     _ensure_display_only_flags(obj)
     md = obj.modifiers.new("AttrViz", 'NODES')
     _assign_viz_engine(md, label, scene=context.scene)
+    node_builder.ensure_viz_ramp(obj)
     # GPU Overlay is the default draw path — suppress GN before wiring
     # Target so create does not evaluate the engine graph.
     if display in ("Markers", "Surface", "Arrows"):
@@ -503,18 +505,26 @@ def evaluated_attributes(obj):
         return [], False
 
 
-def _domain_has_elements(me, domain_ui):
-    if me is None or not hasattr(me, "vertices"):
+def _domain_has_elements(geom, domain_ui):
+    if geom is None:
         return False
-    if domain_ui == "Point":
-        return len(me.vertices) > 0
-    if domain_ui == "Edge":
-        return len(me.edges) > 0
-    if domain_ui == "Face":
-        return len(me.polygons) > 0
-    if domain_ui == "Corner":
-        return len(me.loops) > 0
-    return False
+    if hasattr(geom, "vertices"):
+        if domain_ui == "Point":
+            return len(geom.vertices) > 0
+        if domain_ui == "Edge":
+            return len(geom.edges) > 0
+        if domain_ui == "Face":
+            return len(geom.polygons) > 0
+        if domain_ui == "Corner":
+            return len(geom.loops) > 0
+        return False
+    if domain_ui != "Point":
+        return False
+    try:
+        return geom.attributes.domain_size('POINT') > 0
+    except Exception:
+        pts = getattr(geom, "points", None)
+        return pts is not None and len(pts) > 0
 
 
 def attributes_by_domain(obj):
@@ -543,8 +553,12 @@ def attributes_by_domain(obj):
             continue
         intrinsics = []
         for name, dtype, domains in node_builder.INTRINSICS:
-            if domain in domains:
-                intrinsics.append((name, dtype))
+            if domain not in domains:
+                continue
+            if (name == node_builder.NORMAL_ATTR
+                    and not hasattr(me, "vertices")):
+                continue
+            intrinsics.append((name, dtype))
         by[domain] = intrinsics + by[domain]
     return by, has_faces
 
@@ -557,7 +571,15 @@ def _target_attr_meta(md):
         domain = node_builder.menu_input_name(md, "Domain")
     except Exception:
         return None, None
-    if target is None or not attr:
+    if not attr:
+        return None, domain
+    if target is None:
+        try:
+            meshes = gpu_sample.watch_meshes_for_visualizer(md)
+            target = meshes[0] if meshes else None
+        except Exception:
+            target = None
+    if target is None:
         return None, domain
     dt = node_builder.intrinsic_dtype(attr)
     if dt is not None:
@@ -754,8 +776,42 @@ class ATTRVIZ_OT_remove(bpy.types.Operator):
     def execute(self, context):
         obj = bpy.data.objects.get(self.name)
         if obj is not None and is_visualizer(obj):
+            node_builder.release_viz_ramp(obj)
             bpy.data.objects.remove(obj, do_unlink=True)
         _sync_watch_draw(context)
+        return {'FINISHED'}
+
+
+class ATTRVIZ_OT_ramp_preset(bpy.types.Operator):
+    bl_idname = "attrviz.ramp_preset"
+    bl_label = "Ramp Preset"
+    bl_description = (
+        "Fill this visualizer's ColorRamp with Heat, RGB, or monochrome "
+        "(BnW) stops. The ramp stays editable."
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    name: bpy.props.StringProperty()
+    preset: bpy.props.StringProperty(default="heat")
+
+    @classmethod
+    def poll(cls, context):
+        return _gpu_overlay_on(getattr(context, "scene", None))
+
+    def execute(self, context):
+        obj = bpy.data.objects.get(self.name)
+        if obj is None or not is_visualizer(obj):
+            return {'CANCELLED'}
+        try:
+            node = node_builder.ensure_viz_ramp(obj)
+            node_builder.apply_ramp_preset(node, self.preset)
+        except Exception as exc:
+            self.report({'WARNING'}, str(exc))
+            return {'CANCELLED'}
+        try:
+            gpu_overlay._tag_view3d_redraw()
+        except Exception:
+            pass
         return {'FINISHED'}
 
 
@@ -999,6 +1055,27 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
             _draw_viz_body(body, obj, md, attr_name)
 
 
+def _panel_heat_ramp_node(obj, md):
+    """ValToRGB shown in the Viz panel for the ramp colormap.
+
+    GPU overlay: off-engine per-viz ramp (never the shared engine).
+    Materials path (GPU off): engine-copy ValToRGB.
+    """
+    if _gpu_overlay_on():
+        try:
+            return node_builder.ensure_viz_ramp(obj)
+        except Exception:
+            return None
+    try:
+        return next(
+            (n for n in md.node_group.nodes
+             if n.bl_idname == "ShaderNodeValToRGB"),
+            None,
+        )
+    except Exception:
+        return None
+
+
 def _draw_viz_body(body, obj, md, attr_name):
     """Controls for one visualizer — parented under ``body`` only."""
     body.active = bool(obj.attrviz_enabled)
@@ -1040,38 +1117,66 @@ def _draw_viz_body(body, obj, md, attr_name):
         body.label(
             text="Non-vector → direction (0,0,0); no arrows",
             icon='ERROR')
-    if display == "Surface" and domain == "Edge":
-        body.label(text="Surface on Edge is weakly supported",
-                   icon='INFO')
     if display == "Surface":
-        _draw_socket(body, md, "Show Wireframe")
+        if domain == "Edge":
+            body.label(text="Surface on Edge is weakly supported",
+                       icon='INFO')
+        if not gpu_sample.watch_has_faces(md):
+            body.label(text="Surface needs faces — use Markers",
+                       icon='INFO')
+        else:
+            _draw_socket(body, md, "Show Wireframe")
 
     if colored:
-        body.prop(obj, "attrviz_style", text="Color", expand=True)
-        if style == "RGB" and dtype not in VECTORISH:
-            body.label(text="RGB expects a vector attribute",
-                       icon='INFO')
-        if style == "Random":
-            body.label(text="Stable hash color per element id")
-            _draw_socket(body, md, "Seed")
-        if style == "Heat":
-            # Shared engine (GPU on): do not edit in-group ColorRamp —
-            # one ramp would apply to every viz. GPU Heat uses Range +
-            # Python map in gpu_color. Materials path keeps per-viz ramp.
-            if not _gpu_overlay_on(bpy.context.scene):
-                ramp = next(
-                    (n for n in md.node_group.nodes
-                     if n.bl_idname == 'ShaderNodeValToRGB'), None)
+        if _gpu_overlay_on():
+            if gpu_color.color_mapper(dtype) == "hash":
+                body.label(text="Color")
+                body.label(text="Hash color per id")
+                body.prop(obj, "attrviz_seed", text="Seed")
+            else:
+                body.label(text="Color")
+                prow = body.row(align=True)
+                for key, label in (
+                    ("heat", "Heat"),
+                    ("rgb", "RGB"),
+                    ("bnw", "BnW"),
+                ):
+                    op = prow.operator(
+                        ATTRVIZ_OT_ramp_preset.bl_idname, text=label,
+                    )
+                    op.name = obj.name
+                    op.preset = key
+                ramp = _panel_heat_ramp_node(obj, md)
                 if ramp is not None:
                     body.template_color_ramp(ramp, "color_ramp",
                                              expand=False)
-            col = body.column(align=True)
-            _draw_socket(col, md, "Auto Range")
-            sub = col.column(align=True)
-            sub.active = not bool(
-                node_builder.get_input(md, "Auto Range"))
-            _draw_socket(sub, md, "Range Min")
-            _draw_socket(sub, md, "Range Max")
+                col = body.column(align=True)
+                _draw_socket(col, md, "Auto Range")
+                sub = col.column(align=True)
+                sub.active = not bool(
+                    node_builder.get_input(md, "Auto Range"))
+                _draw_socket(sub, md, "Range Min")
+                _draw_socket(sub, md, "Range Max")
+        else:
+            body.prop(obj, "attrviz_style", text="Color", expand=True)
+            if style == "RGB" and dtype not in VECTORISH:
+                body.label(text="RGB expects a vector attribute",
+                           icon='INFO')
+            if style == "Random":
+                body.label(text="Stable hash color per element id")
+                _draw_socket(body, md, "Seed")
+            if style == "Heat":
+                ramp = _panel_heat_ramp_node(obj, md)
+                if ramp is not None:
+                    body.template_color_ramp(ramp, "color_ramp",
+                                             expand=False)
+                col = body.column(align=True)
+                _draw_socket(col, md, "Auto Range")
+                sub = col.column(align=True)
+                sub.active = not bool(
+                    node_builder.get_input(md, "Auto Range"))
+                _draw_socket(sub, md, "Range Min")
+                _draw_socket(sub, md, "Range Max")
     elif display == "Arrows":
         col = body.column(align=True)
         _draw_socket(col, md, "Arrow Color", text="Color")
@@ -1100,6 +1205,7 @@ CLASSES = (
     ATTRVIZ_OT_watch_add,
     ATTRVIZ_OT_watch_remove,
     ATTRVIZ_OT_remove,
+    ATTRVIZ_OT_ramp_preset,
     ATTRVIZ_OT_use_viz_display_shading,
     ATTRVIZ_MT_domain_point,
     ATTRVIZ_MT_domain_edge,
@@ -1110,6 +1216,14 @@ CLASSES = (
     ATTRVIZ_MT_root,
     ATTRVIZ_PT_panel,
 )
+
+
+def _update_hash_seed(self, context):
+    """Seed is overlay presentation — redraw only, no mesh rebuild."""
+    try:
+        gpu_overlay._tag_view3d_redraw()
+    except Exception:
+        pass
 
 
 def _update_ui_expand(self, context):
@@ -1247,6 +1361,13 @@ def register():
         set=_enum_set("Display", node_builder.DISPLAYS),
         options={'SKIP_SAVE'},
     )
+    bpy.types.Object.attrviz_seed = bpy.props.IntProperty(
+        name="Seed",
+        description="Hash color seed (does not rebuild the overlay mesh)",
+        default=0,
+        min=0,
+        update=_update_hash_seed,
+    )
     bpy.types.VIEW3D_MT_object_context_menu.append(_context_menu)
     tags_draw.register()
     gpu_overlay.register()
@@ -1259,7 +1380,7 @@ def unregister():
         bpy.app.handlers.depsgraph_update_post.remove(_sync_vizcol_active)
     bpy.types.VIEW3D_MT_object_context_menu.remove(_context_menu)
     for attr in ("attrviz_ui_expand", "attrviz_enabled", "attrviz_domain",
-                 "attrviz_style", "attrviz_display"):
+                 "attrviz_style", "attrviz_display", "attrviz_seed"):
         if hasattr(bpy.types.Object, attr):
             delattr(bpy.types.Object, attr)
     # Drop leftover from the abandoned UIList experiment.

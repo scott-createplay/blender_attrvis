@@ -56,7 +56,7 @@ def invalidate(obj=None):
     _sample_caches.pop(ptr, None)
 
 
-def _socket_bundle(md):
+def _socket_bundle(md, obj=None):
     try:
         attr = node_builder.get_input(md, "Attribute")
         domain = node_builder.menu_input_name(md, "Domain")
@@ -77,19 +77,36 @@ def _socket_bundle(md):
         attr, domain, style = "", "Point", "Heat"
         density, seed, auto, rmin, rmax = 1.0, 0, True, 0.0, 1.0
         length, scale, acol = 0.08, 0.02, (0.2, 0.6, 1.0, 1.0)
+    hash_seed = seed
+    if obj is not None:
+        try:
+            hash_seed = int(obj.attrviz_seed)
+        except Exception:
+            pass
     return {
         "attr": attr, "domain": domain, "style": style,
-        "density": density, "seed": seed, "auto": auto,
+        "density": density, "seed": seed, "hash_seed": hash_seed,
+        "auto": auto,
         "rmin": rmin, "rmax": rmax, "length": length, "scale": scale,
         "acol": acol,
     }
 
 
 def _sample_key(obj, display, sock, fp):
-    """L0 — what we sample (view-agnostic: Density only, no cap)."""
+    """L0 — what we sample (view-agnostic: Density only, no cap).
+
+    Seed belongs here only when geometric Density cull uses it. Surface
+    packing ignores Seed; putting it in this key made Seed scrub rebuild
+    the identity mesh.
+    """
+    dens = sock["density"]
+    seed_l0 = 0
+    if (overlay_kind.kind(display) == "geometric"
+            and dens < 1.0 - 1e-12):
+        seed_l0 = sock["seed"]
     return (
         obj.as_pointer(), display, sock["attr"], sock["domain"],
-        sock["density"], sock["seed"], fp,
+        dens, seed_l0, fp,
     )
 
 
@@ -97,13 +114,14 @@ def _present_key(display, sock, extra=()):
     """L1/L2 — presentation only (Length / Range / Style / Color / Scale)."""
     return (
         display, sock["style"], sock["auto"], sock["rmin"], sock["rmax"],
-        sock["length"], sock["scale"], sock["acol"], sock["seed"], extra,
+        sock["length"], sock["scale"], sock["acol"], sock["seed"],
+        sock.get("hash_seed", sock["seed"]), extra,
     )
 
 
 def _viz_cache_key(obj, md, display, extra=()):
     """Full key (sample + present)."""
-    sock = _socket_bundle(md)
+    sock = _socket_bundle(md, obj)
     fp = gpu_sample.watch_fingerprint(md)
     return (
         _sample_key(obj, display, sock, fp)
@@ -137,7 +155,7 @@ def _suppress_gn_carriers(scene):
 
     Call from state changes (GPU flag, Enabled, Display) — never from the
     draw handler (writing modifiers there thrashs the depsgraph).
-    Also syncs Surface target solid-mute (z-fight).
+    Also syncs source solid-mute (Surface → meshes, geometric → clouds).
     """
     from . import visualizers, viz_modifier
     use_gpu = _scene_gpu_on(scene)
@@ -160,21 +178,20 @@ def _suppress_gn_carriers(scene):
     _sync_surface_target_mute(scene)
 
 
-# --- Surface target mute (identity GPU Surface vs Workbench solid) -----
-# Stash Object.display_type and set WIRE for meshes in the active Surface
-# watch set (attrvis if it exists, else Target∪Scope). Same scoping as
-# sampling — no attr discovery. Re-run on Add/Remove objects.
+# --- Source solid mute (overlay vs Workbench / native point spheres) ---
+# Stash Object.display_type and set BOUNDS (WIRE if Show Wireframe).
+# Surface viz → watched MESH. Geometric viz → watched POINTCLOUD.
+# Same attrvis / Target∪Scope scoping as sampling. One mute system.
 _MUTE_PROP = "attrviz_surface_mute_prev"
 _MUTE_DISPLAY = "WIRE"
 _muted_ptrs: set = set()
 
 
-def _active_surface_watch_meshes(scene):
-    """All watched meshes when any Surface visualizer is active.
+def _active_watch_targets(scene, kind_name, blender_type, *, collect_wire=False):
+    """Watched objects of ``blender_type`` while any enabled viz of ``kind_name``.
 
-    GPU overlay IS the visual representation — original meshes in the
-    attrvis collection must be hidden (BOUNDS) to avoid z-fight.
-    Optional wireframe overlay via per-viz toggle.
+    GPU overlay IS the visual representation — originals must be BOUNDS
+    to avoid z-fight (meshes vs Surface, point spheres vs Markers).
 
     Returns list of (obj, show_wire) tuples.
     """
@@ -182,9 +199,9 @@ def _active_surface_watch_meshes(scene):
     if not _scene_gpu_on(scene):
         return []
 
-    # Check if ANY active Surface visualizer exists
     show_wire = False
-    has_surface = False
+    has_kind = False
+    kind_mds = []
     for viz in visualizers(scene):
         if viz.hide_viewport:
             continue
@@ -195,55 +212,59 @@ def _active_surface_watch_meshes(scene):
             display = node_builder.menu_input_name(md, "Display")
         except Exception:
             continue
-        if overlay_kind.kind(display) != "surface":
+        if overlay_kind.kind(display) != kind_name:
             continue
-        has_surface = True
-        try:
-            if bool(node_builder.get_input(md, "Show Wireframe")):
-                show_wire = True
-        except Exception:
-            pass
+        has_kind = True
+        kind_mds.append(md)
+        if collect_wire:
+            try:
+                if bool(node_builder.get_input(md, "Show Wireframe")):
+                    show_wire = True
+            except Exception:
+                pass
 
-    if not has_surface:
+    if not has_kind:
         return []
 
-    # ALL meshes in the watch collection get muted
+    def _append(obj, out, seen):
+        if obj is None or obj.type != blender_type:
+            return
+        key = obj.as_pointer()
+        if key in seen:
+            return
+        seen.add(key)
+        out.append((obj, show_wire))
+
     coll = gpu_sample.scene_watch_collection()
     if coll is not None:
         out = []
         seen = set()
         for obj in coll.objects:
-            if obj.type != 'MESH':
-                continue
-            key = obj.as_pointer()
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append((obj, show_wire))
+            _append(obj, out, seen)
         return out
 
-    # Fallback: no watch collection — use per-viz Target/Scope meshes
     out = []
     seen = set()
-    for viz in visualizers(scene):
-        if viz.hide_viewport:
-            continue
-        md = viz_modifier(viz)
-        if md is None:
-            continue
-        try:
-            display = node_builder.menu_input_name(md, "Display")
-        except Exception:
-            continue
-        if overlay_kind.kind(display) != "surface":
-            continue
-        for mesh in gpu_sample.watch_meshes_for_visualizer(md):
-            key = mesh.as_pointer()
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append((mesh, show_wire))
+    for md in kind_mds:
+        for obj in gpu_sample.watch_meshes_for_visualizer(md):
+            _append(obj, out, seen)
     return out
+
+
+def _active_surface_watch_meshes(scene):
+    """All watched meshes when any Surface visualizer is active."""
+    return _active_watch_targets(
+        scene, "surface", 'MESH', collect_wire=True)
+
+
+def _active_geometric_watch_clouds(scene):
+    """All watched point clouds when any geometric visualizer is active.
+
+    Native POINTCLOUD spheres compete with overlay Markers/Arrows/Tags
+    at the same centers. Mute to BOUNDS (same helpers as Surface).
+    """
+    return _active_watch_targets(
+        scene, "geometric", 'POINTCLOUD', collect_wire=False)
 
 
 def _mute_target_solid(obj, show_wire=False):
@@ -298,7 +319,7 @@ def _rebuild_muted_ptrs():
 
 @persistent
 def _on_load_post(_dummy):
-    """File open: overlay caches are stale; re-apply Surface WIRE mute.
+    """File open: overlay caches are stale; re-apply source solid mute.
 
     Addon register timers do not run again on File → Open. Non-persistent
     depsgraph handlers are also wiped. Mute must be explicit here — writing
@@ -316,16 +337,22 @@ def _on_load_post(_dummy):
         _suppress_gn_carriers(scene)
     except Exception:
         pass
+    try:
+        _subscribe_ramp_msgbus()
+    except Exception:
+        pass
 
 
 def _sync_surface_target_mute(scene=None):
-    """Idempotent: mute watch-set solids for active GPU Surface vizs.
+    """Idempotent: mute watch-set solids for active GPU overlay vizs.
 
-    Safe to call often (depsgraph / state changes). Never from assumptions
-    about attribute-name discovery — only the resolved watch set.
+    Surface → MESH. Geometric (Markers/Arrows/Tags) → POINTCLOUD.
+    Independent; union into one restore loop. Safe to call often.
+    Never from attribute-name discovery — only the resolved watch set.
     """
     scene = scene or bpy.context.scene
-    desired = _active_surface_watch_meshes(scene)
+    desired = list(_active_surface_watch_meshes(scene))
+    desired.extend(_active_geometric_watch_clouds(scene))
     desired_ptrs = {o.as_pointer(): (o, wire) for o, wire in desired}
 
     # Restore anything we muted that is no longer desired.
@@ -347,7 +374,7 @@ def _sync_surface_target_mute(scene=None):
 
 
 def restore_all_surface_mutes():
-    """Unregister / GPU-off cleanup — restore every AttrViz-muted mesh."""
+    """Unregister / GPU-off cleanup — restore every AttrViz-muted object."""
     for obj in list(bpy.data.objects):
         if _MUTE_PROP in obj:
             _restore_target_solid(obj)
@@ -378,6 +405,248 @@ def _build_batch(positions, colors, prim='POINTS'):
                 shader, prim, {"pos": pos_arr},
             )
             return batch, shader, "uniform"
+
+
+# --- Heat LUT shader (positions + scalars; ramp is a 256×1 texture) ----
+_heat_lut_shader = None
+_heat_lut_ok = None  # None unknown; False in --background
+
+
+def _dtype_heat_lut(dtype) -> bool:
+    """True when the ColorRamp maps a scalar (vector → length).
+
+    FLOAT_COLOR / BYTE_COLOR already are colors. INT/BOOLEAN/INT8 hash
+    (task 005) — they must not interpolate along the ramp LUT.
+    """
+    return (
+        dtype is not None
+        and gpu_color.color_mapper(dtype) == "ramp"
+        and dtype not in ("FLOAT_COLOR", "BYTE_COLOR")
+    )
+
+
+def _ramp_colormap(display, dtype) -> bool:
+    """Surface/Markers use the per-viz ColorRamp (presets fill it)."""
+    return display in ("Markers", "Surface") and _dtype_heat_lut(dtype)
+
+
+def _heat_lut_shader_available() -> bool:
+    """CreateInfo LUT shader needs a real GPU context (not --background)."""
+    global _heat_lut_ok
+    if _heat_lut_ok is not None:
+        return bool(_heat_lut_ok)
+    try:
+        _get_heat_lut_shader()
+        _heat_lut_ok = True
+    except Exception:
+        _heat_lut_ok = False
+    return bool(_heat_lut_ok)
+
+
+def _get_heat_lut_shader():
+    """pos + scalar → ColorRamp LUT. Range is uniforms; mesh stays uploaded."""
+    global _heat_lut_shader
+    if _heat_lut_shader is not None:
+        return _heat_lut_shader
+    info = gpu.types.GPUShaderCreateInfo()
+    info.vertex_in(0, "VEC3", "pos")
+    info.vertex_in(1, "FLOAT", "value")
+    iface = gpu.types.GPUStageInterfaceInfo("attrviz_heat_lut")
+    iface.smooth("FLOAT", "fac")
+    info.vertex_out(iface)
+    info.sampler(0, "FLOAT_2D", "ramp_tex")
+    info.push_constant("MAT4", "viewProjectionMatrix")
+    info.push_constant("FLOAT", "vmin")
+    info.push_constant("FLOAT", "vmax")
+    info.push_constant("FLOAT", "pointSize")
+    info.fragment_out(0, "VEC4", "fragColor")
+    info.vertex_source(
+        "void main()\n"
+        "{\n"
+        "  float lo = vmin;\n"
+        "  float hi = vmax;\n"
+        "  fac = (hi <= lo) ? 0.0 : clamp((value - lo) / (hi - lo), 0.0, 1.0);\n"
+        "  gl_Position = viewProjectionMatrix * vec4(pos, 1.0);\n"
+        "  gl_PointSize = pointSize;\n"
+        "}\n"
+    )
+    info.fragment_source(
+        "void main()\n"
+        "{\n"
+        "  float x = fac * 255.0;\n"
+        "  int i0 = int(x);\n"
+        "  int i1 = min(i0 + 1, 255);\n"
+        "  float f = fract(x);\n"
+        "  vec4 c0 = texelFetch(ramp_tex, ivec2(i0, 0), 0);\n"
+        "  vec4 c1 = texelFetch(ramp_tex, ivec2(i1, 0), 0);\n"
+        "  fragColor = mix(c0, c1, f);\n"
+        "}\n"
+    )
+    _heat_lut_shader = gpu.shader.create_from_info(info)
+    return _heat_lut_shader
+
+
+def _heat_batch_key(display, extra=()):
+    """Mesh VBO key for Heat LUT — no ramp, no range."""
+    return (display, "heat_lut", extra)
+
+
+def _id_hash_batch_key(display, extra=()):
+    """Mesh VBO key for id hash — seed is a uniform, not a VBO."""
+    return (display, "id_hash", extra)
+
+
+_id_hash_shader = None
+_id_hash_ok = None
+
+
+def _id_hash_shader_available() -> bool:
+    """CreateInfo id-hash shader needs a real GPU context (not --background)."""
+    global _id_hash_ok
+    if _id_hash_ok is not None:
+        return bool(_id_hash_ok)
+    try:
+        _get_id_hash_shader()
+        _id_hash_ok = True
+    except Exception:
+        _id_hash_ok = False
+    return bool(_id_hash_ok)
+
+
+def _get_id_hash_shader():
+    """pos + id → hash color. Seed is a uniform; mesh stays uploaded."""
+    global _id_hash_shader
+    if _id_hash_shader is not None:
+        return _id_hash_shader
+    info = gpu.types.GPUShaderCreateInfo()
+    info.vertex_in(0, "VEC3", "pos")
+    info.vertex_in(1, "FLOAT", "value")
+    iface = gpu.types.GPUStageInterfaceInfo("attrviz_id_hash")
+    iface.flat("FLOAT", "vid")
+    info.vertex_out(iface)
+    info.push_constant("MAT4", "viewProjectionMatrix")
+    info.push_constant("INT", "seed")
+    info.push_constant("FLOAT", "pointSize")
+    info.fragment_out(0, "VEC4", "fragColor")
+    info.vertex_source(
+        "void main()\n"
+        "{\n"
+        "  vid = value;\n"
+        "  gl_Position = viewProjectionMatrix * vec4(pos, 1.0);\n"
+        "  gl_PointSize = pointSize;\n"
+        "}\n"
+    )
+    # Matches gpu_color.hash_colors (uint32 xorshift * 0x45D9F3B).
+    info.fragment_source(
+        "void main()\n"
+        "{\n"
+        "  uint x = uint(int(vid)) ^ uint(seed);\n"
+        "  x = (x ^ (x >> 16u)) * 0x45D9F3Bu;\n"
+        "  x = (x ^ (x >> 16u)) * 0x45D9F3Bu;\n"
+        "  x = x ^ (x >> 16u);\n"
+        "  float r = float(x & 0xFFu) / 255.0;\n"
+        "  float g = float((x >> 8u) & 0xFFu) / 255.0;\n"
+        "  float b = float((x >> 16u) & 0xFFu) / 255.0;\n"
+        "  fragColor = vec4(0.25 + 0.75 * r, 0.25 + 0.75 * g,\n"
+        "                   0.25 + 0.75 * b, 1.0);\n"
+        "}\n"
+    )
+    _id_hash_shader = gpu.shader.create_from_info(info)
+    return _id_hash_shader
+
+
+def _stops_for_viz(obj):
+    try:
+        node = node_builder.ensure_viz_ramp(obj)
+    except Exception:
+        node = node_builder.ramp_node_for_viz(obj)
+    return gpu_color.extract_ramp(node)
+
+
+def _heat_vmin_vmax(scalars, sock):
+    s = np.asarray(scalars, dtype=np.float32).reshape(-1)
+    if sock.get("auto", True):
+        if s.size == 0:
+            return 0.0, 1.0
+        return float(np.min(s)), float(np.max(s))
+    return float(sock["rmin"]), float(sock["rmax"])
+
+
+def _upload_ramp_lut(stops):
+    lut = gpu_color.ramp_lut_rgba(stops, n=gpu_color.LUT_SIZE)
+    tex, _w = overlay_kind.pack_texture_2d(lut)
+    return tex
+
+
+def _build_value_batch(positions, scalars, prim, shader):
+    with perf.span("overlay.build_batch"):
+        pos_arr = np.ascontiguousarray(positions[:, :3], dtype=np.float32)
+        val_arr = np.ascontiguousarray(
+            np.asarray(scalars, dtype=np.float32).reshape(-1),
+            dtype=np.float32,
+        )
+        batch = batch_for_shader(
+            shader, prim, {"pos": pos_arr, "value": val_arr},
+        )
+        return batch, shader
+
+
+def _build_heat_lut_batch(positions, scalars, prim="TRIS"):
+    return _build_value_batch(
+        positions, scalars, prim, _get_heat_lut_shader(),
+    )
+
+
+def _apply_heat_lut(entry, sock, stops, scalars):
+    """Cheap: rewrite LUT texture + range uniforms. Does not rebuild VBOs."""
+    if scalars is None:
+        return
+    lo, hi = _heat_vmin_vmax(scalars, sock)
+    entry["vmin"] = lo
+    entry["vmax"] = hi
+    entry["ramp_tex"] = _upload_ramp_lut(stops)
+    entry["lut_key"] = (
+        gpu_color.ramp_hash(stops), sock["auto"], sock["rmin"], sock["rmax"],
+    )
+
+
+def _refresh_heat_lut_entry(positions, values, dtype, prim, sock, stops,
+                            point_size=5.0):
+    scalars = gpu_color.heat_scalar(values, dtype)
+    batch, shader = _build_heat_lut_batch(positions, scalars, prim=prim)
+    entry = {
+        "batch": batch,
+        "shader": shader,
+        "mode": "heat_lut",
+        "n": len(positions) if prim == "POINTS" else (len(positions) // 3),
+        "prim": prim,
+        "dtype": dtype,
+        "scalars": scalars,
+        "point_size": float(point_size),
+    }
+    _apply_heat_lut(entry, sock, stops, scalars)
+    return entry
+
+
+def _refresh_id_hash_entry(positions, values, dtype, prim, hash_seed,
+                           point_size=5.0):
+    ids = np.ascontiguousarray(
+        np.asarray(values, dtype=np.float32).reshape(-1), dtype=np.float32,
+    )
+    batch, shader = _build_value_batch(
+        positions, ids, prim, _get_id_hash_shader(),
+    )
+    return {
+        "batch": batch,
+        "shader": shader,
+        "mode": "id_hash",
+        "n": len(positions) if prim == "POINTS" else (len(positions) // 3),
+        "prim": prim,
+        "dtype": dtype,
+        "ids": ids,
+        "hash_seed": int(hash_seed),
+        "point_size": float(point_size),
+    }
 
 
 # --- Arrows instancing (unit cone × N) ---------------------------------
@@ -576,11 +845,52 @@ def _arrow_cone_geometry_impl(positions, values, length: float, radius: float,
 
 
 def _refresh_markers(obj, md, positions, values, dtype, density, seed,
-                     style, rmin, rmax, cap_key_n):
+                     style, rmin, rmax, cap_key_n, *, sock=None, stops=None):
+    mapper = gpu_color.color_mapper(dtype)
+    if mapper == "hash" and _id_hash_shader_available() and sock is not None:
+        try:
+            scale = _float_socket(node_builder.get_input(md, "Scale"), 0.02)
+            point_size = max(2.0, min(24.0, scale * 250.0))
+        except Exception:
+            point_size = 5.0
+        try:
+            return _refresh_id_hash_entry(
+                positions, values, dtype, "POINTS",
+                sock.get("hash_seed", seed),
+                point_size=point_size,
+            )
+        except Exception:
+            pass
+    if (mapper == "ramp"
+            and _dtype_heat_lut(dtype)
+            and _heat_lut_shader_available() and sock is not None
+            and stops is not None):
+        try:
+            scale = _float_socket(node_builder.get_input(md, "Scale"), 0.02)
+            point_size = max(2.0, min(24.0, scale * 250.0))
+        except Exception:
+            point_size = 5.0
+        try:
+            return _refresh_heat_lut_entry(
+                positions, values, dtype, "POINTS", sock,
+                stops or gpu_color.HEAT_STOPS,
+                point_size=point_size,
+            )
+        except Exception:
+            pass
     with perf.span("overlay.colors"):
-        colors = gpu_color.values_to_colors(
-            values, dtype, style, vmin=rmin, vmax=rmax, seed=seed,
-        )
+        if mapper == "hash":
+            colors = gpu_color.hash_colors(values, seed=seed)
+        elif stops is not None and _dtype_heat_lut(dtype):
+            scalars = gpu_color.heat_scalar(values, dtype)
+            colors = gpu_color.ramp_colors(
+                scalars, stops, vmin=rmin, vmax=rmax,
+            )
+        else:
+            colors = gpu_color.values_to_colors(
+                values, dtype, style, vmin=rmin, vmax=rmax, seed=seed,
+                ramp=stops,
+            )
     try:
         batch, shader, mode = _build_batch(positions, colors, prim='POINTS')
     except Exception:
@@ -599,6 +909,7 @@ def _refresh_markers(obj, md, positions, values, dtype, density, seed,
         "n": len(positions),
         "prim": "POINTS",
         "point_size": 5.0,
+        "dtype": dtype,
     }
     try:
         scale = _float_socket(node_builder.get_input(md, "Scale"), 0.02)
@@ -685,7 +996,8 @@ def _refresh_arrows(obj, md, positions, values, dtype):
     }
 
 
-def _refresh_surface_from_sample(sample, style, rmin, rmax, seed):
+def _refresh_surface_from_sample(sample, style, rmin, rmax, seed,
+                                 *, sock=None, stops=None):
     """L2 only — colormap + batch from cached tri positions / corner values."""
     positions = sample["positions"]
     corner_values = sample["values"]
@@ -693,10 +1005,39 @@ def _refresh_surface_from_sample(sample, style, rmin, rmax, seed):
     n_tris = sample["n"]
     if n_tris == 0 or positions is None:
         return {"batch": None, "n": 0, "prim": "TRIS", "empty": True}
+    mapper = gpu_color.color_mapper(dtype)
+    if mapper == "hash" and _id_hash_shader_available() and sock is not None:
+        try:
+            return _refresh_id_hash_entry(
+                positions, corner_values, dtype, "TRIS",
+                sock.get("hash_seed", seed),
+            )
+        except Exception:
+            pass
+    if (mapper == "ramp"
+            and _dtype_heat_lut(dtype)
+            and _heat_lut_shader_available() and sock is not None
+            and stops is not None):
+        try:
+            return _refresh_heat_lut_entry(
+                positions, corner_values, dtype, "TRIS", sock,
+                stops or gpu_color.HEAT_STOPS,
+            )
+        except Exception:
+            pass
     with perf.span("overlay.colors"):
-        colors = gpu_color.values_to_colors(
-            corner_values, dtype, style, vmin=rmin, vmax=rmax, seed=seed,
-        )
+        if mapper == "hash":
+            colors = gpu_color.hash_colors(corner_values, seed=seed)
+        elif stops is not None and _dtype_heat_lut(dtype):
+            scalars = gpu_color.heat_scalar(corner_values, dtype)
+            colors = gpu_color.ramp_colors(
+                scalars, stops, vmin=rmin, vmax=rmax,
+            )
+        else:
+            colors = gpu_color.values_to_colors(
+                corner_values, dtype, style, vmin=rmin, vmax=rmax, seed=seed,
+                ramp=stops,
+            )
     try:
         batch, shader, mode = _build_batch(positions, colors, prim='TRIS')
     except Exception:
@@ -741,10 +1082,11 @@ def _refresh_viz(obj, md, display, cap=50000):
 
 
 def _refresh_viz_impl(obj, md, display, cap=50000):
-    sock = _socket_bundle(md)
+    sock = _socket_bundle(md, obj)
     style = sock["style"] or "Heat"
     density = sock["density"]
     seed = sock["seed"]
+    hash_seed = sock.get("hash_seed", seed)
     rmin = None if sock["auto"] else sock["rmin"]
     rmax = None if sock["auto"] else sock["rmax"]
 
@@ -766,11 +1108,76 @@ def _refresh_viz_impl(obj, md, display, cap=50000):
                     )
             except Exception:
                 pass
-        pkey = _present_key(display, sock, extra=extra + vsig)
+        extra_vsig = extra + vsig
+        # dtype_peek: skip ramp hash on id attrs (hash mapper ignores the ramp).
+        ptr = obj.as_pointer()
+        cached = _caches.get(ptr)
+        sample_peek = _sample_caches.get(ptr)
+        dtype_peek = None
+        if cached is not None and cached.get("sample_key") == skey:
+            dtype_peek = cached.get("dtype")
+        if (dtype_peek is None and sample_peek is not None
+                and sample_peek.get("sample_key") == skey):
+            dtype_peek = sample_peek.get("dtype")
+        use_ramp = (
+            display in ("Markers", "Surface")
+            and gpu_color.color_mapper(dtype_peek) == "ramp"
+        )
+        stops = _stops_for_viz(obj) if use_ramp else None
+        rh = gpu_color.ramp_hash(stops) if stops is not None else ()
+        # Fallback CPU present key includes ramp so --background recolors.
+        # Heat LUT path uses batch_key (no ramp) + lut_key instead.
+        pkey = _present_key(display, sock, extra=extra_vsig + (rh,))
+        if gpu_color.color_mapper(dtype_peek) == "hash":
+            bkey = _id_hash_batch_key(display, extra_vsig)
+        else:
+            bkey = _heat_batch_key(display, extra_vsig)
+        lkey = (rh, sock["auto"], sock["rmin"], sock["rmax"])
+        hkey = sock.get("hash_seed", sock["seed"])
 
-    ptr = obj.as_pointer()
-    cached = _caches.get(ptr)
-    if (cached is not None
+    use_lut = (
+        _ramp_colormap(display, dtype_peek)
+        and _heat_lut_shader_available()
+    )
+    use_hash = (
+        display in ("Markers", "Surface")
+        and gpu_color.color_mapper(dtype_peek) == "hash"
+        and _id_hash_shader_available()
+    )
+    if (use_lut
+            and cached is not None
+            and cached.get("sample_key") == skey
+            and cached.get("batch_key") == bkey
+            and cached.get("mode") == "heat_lut"):
+        if cached.get("lut_key") != lkey:
+            with perf.span("overlay.lut_update"):
+                _apply_heat_lut(
+                    cached, sock, stops, cached.get("scalars"),
+                )
+        try:
+            scale = _float_socket(node_builder.get_input(md, "Scale"), 0.02)
+            cached["point_size"] = max(2.0, min(24.0, scale * 250.0))
+        except Exception:
+            pass
+        with perf.span("overlay.cache_hit"):
+            return cached
+    if (use_hash
+            and cached is not None
+            and cached.get("sample_key") == skey
+            and cached.get("batch_key") == bkey
+            and cached.get("mode") == "id_hash"):
+        if cached.get("hash_seed") != hkey:
+            with perf.span("overlay.hash_seed"):
+                cached["hash_seed"] = hkey
+        try:
+            scale = _float_socket(node_builder.get_input(md, "Scale"), 0.02)
+            cached["point_size"] = max(2.0, min(24.0, scale * 250.0))
+        except Exception:
+            pass
+        with perf.span("overlay.cache_hit"):
+            return cached
+    if (not use_lut and not use_hash
+            and cached is not None
             and cached.get("sample_key") == skey
             and cached.get("present_key") == pkey):
         with perf.span("overlay.cache_hit"):
@@ -813,6 +1220,7 @@ def _refresh_viz_impl(obj, md, display, cap=50000):
         entry = {
             "batch": None, "n": 0, "empty": True,
             "sample_key": skey, "present_key": pkey, "key": pkey,
+            "batch_key": bkey,
         }
         _caches[ptr] = entry
         return entry
@@ -840,7 +1248,7 @@ def _refresh_viz_impl(obj, md, display, cap=50000):
     with perf.span(f"overlay.present.{display}"):
         if k == "surface":
             entry = _refresh_surface_from_sample(
-                sample, style, rmin, rmax, seed,
+                sample, style, rmin, rmax, hash_seed, sock=sock, stops=stops,
             )
         elif display == "Arrows":
             entry = _refresh_arrows(
@@ -849,11 +1257,14 @@ def _refresh_viz_impl(obj, md, display, cap=50000):
         else:
             entry = _refresh_markers(
                 obj, md, positions, values, sample["dtype"],
-                density, seed, style, rmin, rmax, len(positions),
+                density, hash_seed, style, rmin, rmax, len(positions),
+                sock=sock, stops=stops,
             )
 
     entry["sample_key"] = skey
     entry["present_key"] = pkey
+    entry["batch_key"] = bkey
+    entry["lut_key"] = lkey if entry.get("mode") == "heat_lut" else None
     entry["key"] = pkey  # back-compat
     _caches[ptr] = entry
     return entry
@@ -877,6 +1288,38 @@ def _draw_gpu_entry(entry):
         shader = entry["shader"]
         shader.bind()
         mode = entry.get("mode")
+        if mode in ("heat_lut", "id_hash"):
+            try:
+                rv3d = bpy.context.region_data
+                mvp = rv3d.perspective_matrix if rv3d is not None else None
+                if mvp is not None:
+                    shader.uniform_float("viewProjectionMatrix", mvp)
+                else:
+                    shader.uniform_float(
+                        "viewProjectionMatrix",
+                        gpu.matrix.get_projection_matrix()
+                        @ gpu.matrix.get_model_view_matrix(),
+                    )
+            except Exception:
+                shader.uniform_float(
+                    "viewProjectionMatrix",
+                    gpu.matrix.get_projection_matrix()
+                    @ gpu.matrix.get_model_view_matrix(),
+                )
+            shader.uniform_float(
+                "pointSize", float(entry.get("point_size", 5.0)),
+            )
+            if mode == "heat_lut":
+                shader.uniform_float("vmin", float(entry.get("vmin", 0.0)))
+                shader.uniform_float("vmax", float(entry.get("vmax", 1.0)))
+                shader.uniform_sampler("ramp_tex", entry["ramp_tex"])
+            else:
+                s = int(entry.get("hash_seed", 0)) & 0xFFFFFFFF
+                if s >= 0x80000000:
+                    s -= 0x100000000
+                shader.uniform_int("seed", s)
+            entry["batch"].draw(shader)
+            return
         if mode == "instanced":
             try:
                 rv3d = bpy.context.region_data
@@ -955,6 +1398,54 @@ def _draw_callback_view_impl():
     gpu.state.depth_test_set('NONE')
 
 
+def _tag_view3d_redraw(*_args):
+    """Redraw 3D views so Heat LUT picks up ColorRamp drags.
+
+    The off-engine ramp tree is not a modifier, so stop-moves may not
+    depsgraph-evaluate. msgbus → tag_redraw is enough: next draw reads
+    stops and does overlay.lut_update (no mesh rebuild).
+    """
+    if not _scene_gpu_on():
+        return
+    try:
+        wm = bpy.context.window_manager
+        if wm is None:
+            return
+        for window in wm.windows:
+            screen = window.screen
+            if screen is None:
+                continue
+            for area in screen.areas:
+                if area.type == "VIEW_3D":
+                    area.tag_redraw()
+    except Exception:
+        pass
+
+
+_ramp_msgbus = object()
+
+
+def _subscribe_ramp_msgbus():
+    try:
+        bpy.msgbus.clear_by_owner(_ramp_msgbus)
+    except Exception:
+        pass
+    for key in (
+        (bpy.types.ColorRampElement, "color"),
+        (bpy.types.ColorRampElement, "position"),
+        (bpy.types.ColorRamp, "interpolation"),
+    ):
+        try:
+            bpy.msgbus.subscribe_rna(
+                key=key,
+                owner=_ramp_msgbus,
+                args=(),
+                notify=_tag_view3d_redraw,
+            )
+        except Exception:
+            pass
+
+
 def _on_gpu_flag_update(self, context):
     invalidate_all()
     _suppress_gn_carriers(context.scene)
@@ -990,9 +1481,9 @@ def register():
             name="GPU Overlay",
             description=(
                 "Draw Markers / Surface / Arrows as unlit GPU ink in Solid "
-                "mode; hides GN carrier meshes; Surface mutes watched mesh "
-                "solid draw (WIRE) to avoid z-fight. Tags stay on the text "
-                "prototype. Turn off to use the materials/GN path"
+                "mode; hides GN carrier meshes; mutes watched mesh/cloud "
+                "solid draw (BOUNDS) so overlay is what you see. Tags stay "
+                "on the text prototype. Turn off to use the materials/GN path"
             ),
             default=True,
             update=_on_gpu_flag_update,
@@ -1013,12 +1504,17 @@ def register():
         bpy.app.timers.register(_boot_suppress, first_interval=0.1)
     except Exception:
         pass
+    _subscribe_ramp_msgbus()
     if _on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_load_post)
 
 
 def unregister():
     global _handle
+    try:
+        bpy.msgbus.clear_by_owner(_ramp_msgbus)
+    except Exception:
+        pass
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
     if _handle is not None:
