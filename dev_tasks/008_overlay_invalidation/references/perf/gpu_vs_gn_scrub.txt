@@ -11,3 +11,41 @@ drawing of the GN result. 'distinct' must be n/n or the scrub was a no-op.
    160000 |      1.8ms |       7.1ms |      62.4ms |      5.3ms |     60.6ms | GPU 11.4x | 4/4
    490000 |      4.7ms |      18.4ms |     189.1ms |     13.8ms |    184.4ms | GPU 13.4x | 4/4
   1000000 |      6.1ms |      36.8ms |     385.8ms |     30.7ms |    379.6ms | GPU 12.4x | 4/4
+
+--------------------------------------------------------------------------
+AFTER P2 item 1 (attribute accessor for positions + normals) — 2 runs
+--------------------------------------------------------------------------
+    verts |   baseline |   GPU total |    GN total |  GPU marg. |   GN marg. | winner    | distinct
+    40000 |      1.0ms |       1.5ms |      13.9ms |      0.5ms |     13.0ms | GPU 26.1x | 4/4
+   160000 |      3.2ms |       4.2ms |      60.6ms |      1.0ms |     57.5ms | GPU 57.5x | 4/4
+   490000 |      4.3ms |      11.2ms |     194.1ms |      6.9ms |    189.8ms | GPU 27.4x | 4/4
+  1000000 |      6.0ms |      21.1ms |     393.5ms |     15.1ms |    387.5ms | GPU 25.6x | 4/4
+    40000 |      0.9ms |       1.6ms |      13.9ms |      0.7ms |     13.1ms | GPU 18.1x | 4/4
+   160000 |      1.8ms |       4.8ms |      62.3ms |      3.0ms |     60.6ms | GPU 20.1x | 4/4
+   490000 |      4.6ms |      11.7ms |     191.1ms |      7.2ms |    186.5ms | GPU 26.1x | 4/4
+  1000000 |      6.6ms |      20.7ms |     386.5ms |     14.0ms |    379.8ms | GPU 27.1x | 4/4
+
+GPU marginal, before -> after:
+   40k   1.2 ->  0.6 ms
+  160k   5.3 ->  2.0 ms
+  490k  13.8 ->  7.0 ms
+    1M  30.7 -> 14.5 ms   (2.1x; projection was ~11 ms — see POR P2)
+
+Variance warning: a third run under load reported 1M GN marginal at 526 ms
+against ~385 ms here. The big rows swing with machine load; take the median
+of at least two runs before drawing conclusions.
+
+--------------------------------------------------------------------------
+Domain readers, addon functions, 160k verts / 319k edges / 637k loops
+--------------------------------------------------------------------------
+Reader                    before      after
+_point_positions       16.4ms@1M      0.0ms
+_point_normals         38.4ms@1M      0.0ms
+_face_centers              90.8ms     9.4ms   (no cached centre array)
+_face_normals              92.9ms     0.0ms
+_edge_centers             504.9ms    22.6ms
+_corner_positions         518.7ms    20.9ms
+corner normals            ~520ms     21.2ms
+
+The first pass fixed only Point -- already the cheapest path. Face/Edge/
+Corner were per-element Python loops, never on foreach_get at all.

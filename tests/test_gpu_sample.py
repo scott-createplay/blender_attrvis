@@ -949,6 +949,139 @@ check("P4 disable viz restores cloud",
       pc_p4.display_type == prev_pc_p4, pc_p4.display_type)
 check("P4 disable viz clears prop", gpu_overlay._MUTE_PROP not in pc_p4)
 
+print("\n== 008 P2: attribute accessor reads match the legacy reads ==")
+# Positions/normals now read through the contiguous attribute arrays rather
+# than the legacy vertices collection (56x / 128x). The reads must be
+# byte-identical or every visualizer silently moves.
+import bmesh as _bm  # noqa: E402
+
+_me = bpy.data.meshes.new("AccessorGrid")
+_b = _bm.new()
+_bm.ops.create_grid(_b, x_segments=12, y_segments=12, size=2.0)
+_b.to_mesh(_me)
+_b.free()
+_obj = bpy.data.objects.new("AccessorGrid", _me)
+bpy.context.collection.objects.link(_obj)
+
+_n = len(_me.vertices)
+_legacy = np.empty(_n * 3, dtype=np.float32)
+_me.vertices.foreach_get("co", _legacy)
+check("008 fast positions == vertices.foreach_get('co')",
+      np.array_equal(gpu_sample._point_positions(_me),
+                     _legacy.reshape(-1, 3)))
+
+_legacy_n = np.empty(_n * 3, dtype=np.float32)
+_me.vertices.foreach_get("normal", _legacy_n)
+check("008 fast normals == vertices.foreach_get('normal')",
+      np.array_equal(gpu_sample._point_normals(_me, _n),
+                     _legacy_n.reshape(-1, 3)))
+
+# The path that actually matters: EVALUATED geometry out of a GN tree, where
+# the layer set differs from a plain datablock.
+_tree = bpy.data.node_groups.new("AccessorGN", "GeometryNodeTree")
+_tree.interface.new_socket("Geometry", in_out='INPUT',
+                           socket_type="NodeSocketGeometry")
+_tree.interface.new_socket("Geometry", in_out='OUTPUT',
+                           socket_type="NodeSocketGeometry")
+_gi = _tree.nodes.new("NodeGroupInput")
+_go = _tree.nodes.new("NodeGroupOutput")
+_sp = _tree.nodes.new("GeometryNodeSetPosition")
+_off = _tree.nodes.new("ShaderNodeCombineXYZ")
+_off.inputs["Z"].default_value = 3.0
+_tree.links.new(_gi.outputs[0], _sp.inputs["Geometry"])
+_tree.links.new(_off.outputs["Vector"], _sp.inputs["Offset"])
+_tree.links.new(_sp.outputs["Geometry"], _go.inputs[0])
+_gmd = _obj.modifiers.new("gn", 'NODES')
+_gmd.node_group = _tree
+bpy.context.view_layer.update()
+_dg = bpy.context.evaluated_depsgraph_get()
+_dg.update()
+_ev = _obj.evaluated_get(_dg).data
+
+_ev_legacy = np.empty(len(_ev.vertices) * 3, dtype=np.float32)
+_ev.vertices.foreach_get("co", _ev_legacy)
+_ev_fast = gpu_sample._point_positions(_ev)
+check("008 evaluated GN positions byte-identical",
+      np.array_equal(_ev_fast, _ev_legacy.reshape(-1, 3)))
+check("008 evaluated GN positions reflect the modifier",
+      abs(float(_ev_fast[0][2]) - 3.0) < 1e-5, str(_ev_fast[0]))
+
+# Fallback must hold when the attribute is absent/wrong type.
+_buf = np.empty(_n * 3, dtype=np.float32)
+check("008 _attr_vec3 declines a missing attribute",
+      gpu_sample._attr_vec3(_me, "definitely_not_here", _buf) is False)
+check("008 _bulk_into declines a bad property",
+      gpu_sample._bulk_into(_me.vertices, "not_a_prop", _buf) is False)
+
+# Face / Edge / Corner used per-element Python loops. The bulk versions must
+# reproduce them exactly — these are the reference implementations.
+_sharp = _me.polygons[0]
+_sharp.use_smooth = False
+
+
+def _ref_face_centers(m):
+    a = np.empty((len(m.polygons), 3), dtype=np.float32)
+    for i, p in enumerate(m.polygons):
+        a[i] = p.center
+    return a
+
+
+def _ref_edge_centers(m):
+    a = np.empty((len(m.edges), 3), dtype=np.float32)
+    for i, e in enumerate(m.edges):
+        a[i] = (m.vertices[e.vertices[0]].co
+                + m.vertices[e.vertices[1]].co) * 0.5
+    return a
+
+
+def _ref_corner_positions(m):
+    a = np.empty((len(m.loops), 3), dtype=np.float32)
+    for i, lp in enumerate(m.loops):
+        a[i] = m.vertices[lp.vertex_index].co
+    return a
+
+
+def _ref_face_normals(m):
+    a = np.empty((len(m.polygons), 3), dtype=np.float32)
+    for i, p in enumerate(m.polygons):
+        a[i] = p.normal
+    return a
+
+
+def _ref_corner_normals(m):
+    vn = np.empty(len(m.vertices) * 3, dtype=np.float32)
+    m.vertices.foreach_get("normal", vn)
+    vn = vn.reshape(-1, 3)
+    a = np.empty((len(m.loops), 3), dtype=np.float32)
+    for i, lp in enumerate(m.loops):
+        a[i] = vn[lp.vertex_index]
+    return a
+
+
+check("008 face centers match per-element reference",
+      np.allclose(gpu_sample._face_centers(_me), _ref_face_centers(_me),
+                  atol=1e-6))
+check("008 edge centers match per-element reference",
+      np.allclose(gpu_sample._edge_centers(_me), _ref_edge_centers(_me),
+                  atol=1e-6))
+check("008 corner positions match per-element reference",
+      np.array_equal(gpu_sample._corner_positions(_me),
+                     _ref_corner_positions(_me)))
+check("008 face normals match per-element reference",
+      np.allclose(gpu_sample._face_normals(_me, len(_me.polygons)),
+                  _ref_face_normals(_me), atol=1e-6))
+_corner_fast, _ = gpu_sample._read_intrinsic(
+    _me, node_builder.NORMAL_ATTR, "Corner", len(_me.loops))
+check("008 corner normals stay SMOOTH (not split) — behaviour preserved",
+      np.allclose(_corner_fast, _ref_corner_normals(_me), atol=1e-6))
+
+# Degenerate geometry must not crash the bulk paths.
+_empty = bpy.data.meshes.new("EmptyMesh")
+check("008 empty mesh: edge centers", len(gpu_sample._edge_centers(_empty)) == 0)
+check("008 empty mesh: corner positions",
+      len(gpu_sample._corner_positions(_empty)) == 0)
+check("008 empty mesh: face centers", len(gpu_sample._face_centers(_empty)) == 0)
+
 print(f"\n== Result: {PASS} passed, {FAIL} failed ==")
 if FAIL:
     sys.exit(1)

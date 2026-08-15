@@ -144,11 +144,92 @@ def _read_attr(me, name: str, domain: str, n: int):
     return None, dt
 
 
+# ── bulk accessors ──────────────────────────────────────────────────
+#
+# NEVER read geometry per element. Blender stores mesh data as contiguous
+# typed arrays; the `vertices` / `polygons` / `loops` collections are legacy
+# views over them, so a Python loop (or even `foreach_get` on the collection)
+# re-resolves RNA per item. Measured at 160k verts / 637k loops:
+#
+#   Point positions   0.1 ms (attribute)   vs   16.4 ms at 1M via vertices.co
+#   Face centers      9.3 ms (bulk)        vs   90.8 ms per-element
+#   Face normals      0.1 ms (cache)       vs   93.1 ms per-element
+#   Edge centers     23.0 ms (bulk+numpy)  vs  504.9 ms per-element
+#   Corner positions 21.6 ms (bulk+numpy)  vs  518.7 ms per-element
+#
+# Everything below routes through _attr_into / _bulk_into. Both share one
+# contract: fill the buffer and return True, or touch nothing and return
+# False so the caller can fall back. Add a reader here, not inline.
+
+
+def _attr_into(geom, name: str, prop: str, out, data_type=None) -> bool:
+    """Fill ``out`` from a named attribute's backing array."""
+    attrs = getattr(geom, "attributes", None)
+    if attrs is None:
+        return False
+    try:
+        attr = attrs.get(name)
+        if attr is None:
+            return False
+        if data_type is not None and attr.data_type != data_type:
+            return False
+        attr.data.foreach_get(prop, out)
+        return True
+    except Exception:
+        return False
+
+
+def _bulk_into(coll, prop: str, out) -> bool:
+    """Fill ``out`` from a collection via ``foreach_get``."""
+    if coll is None:
+        return False
+    try:
+        coll.foreach_get(prop, out)
+        return True
+    except Exception:
+        return False
+
+
+def _attr_vec3(geom, name: str, out) -> bool:
+    """FLOAT_VECTOR attribute → ``out``. Kept for the position/cloud paths."""
+    return _attr_into(geom, name, "vector", out, data_type='FLOAT_VECTOR')
+
+
 def _point_positions(me) -> np.ndarray:
-    n = len(me.vertices)
-    cos = np.empty(n * 3, dtype=np.float32)
-    me.vertices.foreach_get("co", cos)
+    cos = np.empty(len(me.vertices) * 3, dtype=np.float32)
+    if not _attr_vec3(me, "position", cos):
+        _bulk_into(me.vertices, "co", cos)
     return cos.reshape(-1, 3)
+
+
+def _point_normals(me, n: int) -> np.ndarray:
+    a = np.empty(n * 3, dtype=np.float32)
+    if not _bulk_into(getattr(me, "vertex_normals", None), "vector", a):
+        _bulk_into(me.vertices, "normal", a)
+    return a.reshape(-1, 3)
+
+
+def _face_normals(me, n: int) -> np.ndarray:
+    a = np.empty(n * 3, dtype=np.float32)
+    if not _bulk_into(getattr(me, "polygon_normals", None), "vector", a):
+        _bulk_into(me.polygons, "normal", a)
+    return a.reshape(-1, 3)
+
+
+def _corner_vert_index(me) -> np.ndarray:
+    """Vertex index per corner — the loop→vert map, bulk."""
+    idx = np.empty(len(me.loops), dtype=np.int32)
+    if not _attr_into(me, ".corner_vert", "value", idx):
+        _bulk_into(me.loops, "vertex_index", idx)
+    return idx
+
+
+def _edge_vert_index(me) -> np.ndarray:
+    """(N, 2) vertex indices per edge, bulk."""
+    ev = np.empty(len(me.edges) * 2, dtype=np.int32)
+    if not _attr_into(me, ".edge_verts", "value", ev):
+        _bulk_into(me.edges, "vertices", ev)
+    return ev.reshape(-1, 2)
 
 
 def _cloud_positions(pc) -> np.ndarray:
@@ -156,6 +237,8 @@ def _cloud_positions(pc) -> np.ndarray:
     if n == 0:
         return np.zeros((0, 3), dtype=np.float32)
     cos = np.empty(n * 3, dtype=np.float32)
+    if _attr_vec3(pc, "position", cos):
+        return cos.reshape(-1, 3)
     pts = getattr(pc, "points", None)
     if pts is not None:
         try:
@@ -163,37 +246,32 @@ def _cloud_positions(pc) -> np.ndarray:
             return cos.reshape(-1, 3)
         except Exception:
             pass
-    attr = pc.attributes.get("position") if hasattr(pc, "attributes") else None
-    if attr is not None:
-        attr.data.foreach_get("vector", cos)
-        return cos.reshape(-1, 3)
     return np.zeros((0, 3), dtype=np.float32)
 
 
 def _face_centers(me) -> np.ndarray:
     n = len(me.polygons)
-    centers = np.empty((n, 3), dtype=np.float32)
+    centers = np.empty(n * 3, dtype=np.float32)
+    if _bulk_into(me.polygons, "center", centers):
+        return centers.reshape(-1, 3)
+    out = np.empty((n, 3), dtype=np.float32)
     for i, poly in enumerate(me.polygons):
-        centers[i] = poly.center
-    return centers
+        out[i] = poly.center
+    return out
 
 
 def _edge_centers(me) -> np.ndarray:
-    n = len(me.edges)
-    centers = np.empty((n, 3), dtype=np.float32)
-    for i, e in enumerate(me.edges):
-        centers[i] = (
-            me.vertices[e.vertices[0]].co + me.vertices[e.vertices[1]].co
-        ) * 0.5
-    return centers
+    if len(me.edges) == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    pos = _point_positions(me)
+    ev = _edge_vert_index(me)
+    return ((pos[ev[:, 0]] + pos[ev[:, 1]]) * 0.5).astype(np.float32)
 
 
 def _corner_positions(me) -> np.ndarray:
-    n = len(me.loops)
-    pos = np.empty((n, 3), dtype=np.float32)
-    for i, loop in enumerate(me.loops):
-        pos[i] = me.vertices[loop.vertex_index].co
-    return pos
+    if len(me.loops) == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    return _point_positions(me)[_corner_vert_index(me)]
 
 
 def _to_world(positions: np.ndarray, matrix_world) -> np.ndarray:
@@ -242,22 +320,16 @@ def _read_intrinsic(me, name: str, domain_ui: str, cos=None):
 
     if name == node_builder.NORMAL_ATTR:
         if domain_ui == "Point":
-            a = np.empty(n * 3, dtype=np.float32)
-            me.vertices.foreach_get("normal", a)
-            return a.reshape(-1, 3), 'FLOAT_VECTOR'
+            return _point_normals(me, n), 'FLOAT_VECTOR'
         if domain_ui == "Face":
-            a = np.empty((n, 3), dtype=np.float32)
-            for i, poly in enumerate(me.polygons):
-                a[i] = poly.normal
-            return a, 'FLOAT_VECTOR'
+            return _face_normals(me, n), 'FLOAT_VECTOR'
         if domain_ui == "Corner":
-            vn = np.empty(len(me.vertices) * 3, dtype=np.float32)
-            me.vertices.foreach_get("normal", vn)
-            vn = vn.reshape(-1, 3)
-            a = np.empty((n, 3), dtype=np.float32)
-            for i, loop in enumerate(me.loops):
-                a[i] = vn[loop.vertex_index]
-            return a, 'FLOAT_VECTOR'
+            # Smooth vertex normal indexed per corner — NOT me.corner_normals,
+            # which are split normals and would change what Arrows draw on a
+            # sharp-edged mesh. Behaviour preserved deliberately; switching to
+            # split normals is a product call, not a perf one.
+            return (_point_normals(me, len(me.vertices))[_corner_vert_index(me)],
+                    'FLOAT_VECTOR')
     return None, None
 
 
@@ -619,10 +691,7 @@ def _build_surface_tris_impl(
         # so Range/Style scrub can recolor without re-packing tris.
         values = np.asarray(values)
 
-        n_verts = len(me.vertices)
-        cos = np.empty(n_verts * 3, dtype=np.float32)
-        me.vertices.foreach_get("co", cos)
-        cos = cos.reshape(-1, 3)
+        cos = _point_positions(me)
 
         with _span("sample.surface_tri_pack"):
             vert_ids = np.empty(n_tris * 3, dtype=np.int32)

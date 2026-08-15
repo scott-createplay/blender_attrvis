@@ -108,8 +108,29 @@ Correct-but-slow beats fast-but-lying: a stale visualizer is silently wrong, whi
 
 **Do these in order and re-measure between each.** The first item is most of the win and changes whether the rest are worth doing at all.
 
-- [ ] **Read positions through the attribute accessor, not the legacy collection.** `_point_positions` uses `me.vertices.foreach_get("co")` (`gpu_sample.py:150`); the equivalent `me.attributes["position"].data.foreach_get("vector")` is **56× faster and byte-identical**. Same for `me.vertices.foreach_get("normal")` (`gpu_sample.py:246`, `:255`) → `me.vertex_normals.foreach_get("vector")`, **128×**. Also `gpu_sample.py:624` on the Surface path. `_cloud_positions` (`:168`) already does this — the mesh path just never caught up.
-- [ ] **Confirm the win holds on evaluated (GN-output) meshes**, not just plain datablocks. It is an API-path difference so it should carry over, but it was measured on a plain mesh — verify before banking it.
+- [x] **No per-element geometry reads anywhere in the sampler.** All reads route through two shared primitives with one contract — fill the buffer and return True, or touch nothing and return False so the caller falls back:
+  - `_attr_into(geom, name, prop, out, data_type)` — attribute-backed
+  - `_bulk_into(coll, prop, out)` — collection-backed
+  - composed into `_attr_vec3`, `_point_positions`, `_point_normals`, `_face_normals`, `_corner_vert_index`, `_edge_vert_index`
+
+  The first pass fixed only the Point domain — which was already the *cheapest* path. Face / Edge / Corner were per-element Python loops that had never been on `foreach_get` at all, some with a random-access vertex lookup per iteration. Measured on the addon's own functions at 160k verts / 319k edges / 637k loops:
+
+  | Reader | Before | After |
+  |---|---:|---:|
+  | `_point_positions` | 16.4 ms @1M | **0.0 ms** |
+  | `_point_normals` | 38.4 ms @1M | **0.0 ms** |
+  | `_face_centers` | 90.8 ms | **9.4 ms** |
+  | `_face_normals` | 92.9 ms | **0.0 ms** |
+  | `_edge_centers` | 504.9 ms | **22.6 ms** |
+  | `_corner_positions` | 518.7 ms | **20.9 ms** |
+  | corner normals | ~520 ms | **21.2 ms** |
+
+  Also: Surface (`:624`) routes through `_point_positions`; `_cloud_positions` reordered to try the attribute *first* (it had been preferring the slow `points.foreach_get("co")`).
+
+  **Display type is not the axis — domain is.** Markers / Arrows / Tags / Surface all reach these through `sample_evaluated` (Tags via `tags_draw.py:267`, `:283`), so one fix covers every visualizer type.
+
+  Two deliberate stops: **face centres reach only 9.4×** because there is no cached centre array — going further means computing from corner verts + polygon offsets in numpy, real work for ~9 ms. And **corner normals stay smooth, not split** — `me.corner_normals` exists and is a single fast read, but returns split normals, which changes what Arrows draw on a sharp-edged mesh. Behaviour preserved with a test asserting it; switching is a product call.
+- [x] **Confirmed on evaluated (GN-output) meshes**, not just plain datablocks — byte-identical, and the read reflects the modifier. 14 checks in `tests/test_gpu_sample.py` compare every reader against the original per-element implementation, kept in the test as the reference, plus empty-mesh guards and a negative case per primitive.
 - [ ] Move the world transform to a shader uniform instead of a numpy pass over N×3 (7.4 ms at 1M).
 - [ ] Reuse preallocated buffers when the element count is unchanged (~12 MB churn per tick at 1M verts).
 - [ ] Split the position cache from the value cache with independent epochs — an attribute-only scrub should not re-read positions. **Low priority after item 1**: the attribute read is already 0.1 ms; it is the position read that costs, and item 1 takes it to 0.29 ms.
@@ -127,7 +148,18 @@ Measured primitives at 1M verts (5.2.0) that set the budget:
 | numpy world transform | 7.4 ms | yes |
 | numpy cull / fancy-index | 3.7 ms | yes |
 
-Projected: ~33 ms → **~11 ms** at 1M from item 1 alone, and **~4 ms** with the transform moved to the shader. At that point P1's throttle should effectively never engage.
+**Measured after item 1** (GPU marginal cost per scrub tick, median of 2 runs):
+
+| verts | before | after |
+|---:|---:|---:|
+| 40,000 | 1.2 ms | **0.6 ms** |
+| 160,000 | 5.3 ms | **2.0 ms** |
+| 490,000 | 13.8 ms | **7.0 ms** |
+| 1,000,000 | 30.7 ms | **14.5 ms** |
+
+2.1× at 1M. The projection was ~11 ms — the extra ~3.5 ms is per-sample work the projection did not itemise (concat, dtype handling, the `sample_visualizer_targets` wrapper), not a shortfall in the accessor swap itself. The remaining budget is now dominated by the numpy tail, so the shader-uniform transform is the next real lever. The GPU-vs-GN ratio widened from 11–13× to **20–27×**.
+
+Benchmark hygiene: the 490k and 1M rows swing with machine load — one run under load reported 1M GN marginal at 526 ms against ~385 ms otherwise. Take the median of at least two runs.
 
 **The win is accessor-specific, not a blanket rule.** It tracks whether the RNA property exposes the underlying typed array: `.vector` on FLOAT_VECTOR copies wholesale, while an INT `.value` read still resolves per element. Counter-example measured — `loops.foreach_get("vertex_index")` 165.7 ms vs `attributes[".corner_vert"]` 109.4 ms, only 1.5×. So **the Surface triangle gather (`gpu_sample.py:631-633`) does not get this win**: `loop_triangles` is derived data with no attribute backing. Surface gets the position win only; do not budget 56× for it.
 
