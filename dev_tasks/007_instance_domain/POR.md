@@ -93,10 +93,10 @@ Do **not** realize instances to sample them. The whole point is reading the chea
 3. **The values are the real values.** Un-realized instance-domain `height` is byte-identical to what Realize duplicates onto 8 verts per building (`realized per-building values == instance-domain values: True`). Realize *duplicates*; it does not compute. Reading the instance domain is strictly more faithful.
 
 - [ ] **Version floor — undecided, cannot be tested here.** Only Blender 5.2 is installed; no 5.0/5.1 binary on the machine. `blender_version_min = "5.0.0"` is therefore unverified for `instances_pointcloud()`. Either raise the floor to what is actually tested, or ship and document the risk. **Decision required before release, not before implementation.**
-- [ ] `evaluated_attributes`: add the instances component via a `_instances_cloud(gs)` helper that tolerates method-or-property and returns `None` on failure. Tag its rows with a synthetic `INSTANCE` domain so `attributes_by_domain` can route them.
-- [ ] `attributes_by_domain`: source `_domain_has_elements` from the **geometry set**, not `ev.data`. This alone restores intrinsics on any GN object whose top-level mesh is empty (a bug wider than instances).
-- [ ] `_domain_has_elements`: Instance true iff the instances cloud has points; Point/Edge/Face/Corner unaffected by its presence.
-- [ ] Tests: headless fixture reproducing `city_seed_scatter` (Grid → Distribute → Store ×3 → Instance on Points, no Realize) — `attributes_by_domain` returns `height`/`width`/`depth` under Instance and nothing under Point.
+- [x] `evaluated_attributes`: add the instances component via a `_instances_cloud(gs)` helper that tolerates method-or-property and returns `None` on failure. Tag its rows with a synthetic `INSTANCE` domain so `attributes_by_domain` can route them.
+- [x] `attributes_by_domain`: source `_domain_has_elements` from the **geometry set**, not `ev.data`. This alone restores intrinsics on any GN object whose top-level mesh is empty (a bug wider than instances).
+- [x] `_domain_has_elements`: Instance true iff the instances cloud has points; Point/Edge/Face/Corner unaffected by its presence.
+- [x] Tests: headless fixture reproducing `city_seed_scatter` (Grid → Distribute → Store ×3 → Instance on Points, no Realize) — `attributes_by_domain` returns `height`/`width`/`depth` under Instance and nothing under Point.
 
 ### P1 — Menu + sampling ✅
 
