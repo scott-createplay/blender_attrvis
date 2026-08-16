@@ -95,6 +95,12 @@ blender --background --factory-startup --python-exit-code 1 \
   --python tests/test_gpu_sample.py
 ```
 
+## Design notes
+
+[`docs/explorations.md`](docs/explorations.md) — design work that is settled enough to
+remember but not scheduled: the constant/varying readout, Tags collapse, and pointers to
+what is parked in the PORs.
+
 ## Roadmap
 
 - Tags: dynamic glyph atlas (semantic text at higher caps), then
