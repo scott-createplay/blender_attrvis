@@ -280,9 +280,20 @@ product drift that reading datablock ID properties would mean.
 1. **Nothing** — manual taps work today.
 2. **Tap helper** — insert/remove `Store Named Attribute` on a chosen socket + domain,
    marked (`attrviz_tap_*`) and reversible.
-3. **Viewer-node passthrough** — Blender's Viewer node is already an instrumentation tap.
-   If its geometry is reachable from Python, this is strictly better than (2): no graph
-   mutation, no cleanup, no ownership. **Probe this before designing (2).**
+3. **Viewer-node passthrough** — ~~Blender's Viewer node is already an instrumentation
+   tap; if its geometry is reachable from Python this is strictly better than (2).~~
+   **PROBED — not viable.** `GeometryNodeViewer` exists and its `domain` enum is
+   `AUTO / POINT / EDGE / FACE / CORNER / CURVE / INSTANCE / LAYER`, so it captures at
+   instance scope natively rather than realizing — and `SpreadsheetTableIDGeometry`
+   carries both `geometry_component_type` and `attribute_domain`, so the Spreadsheet
+   selects a component and domain rather than flattening. But **the results are not
+   reachable from Python**: everything exposed is addressing (`ViewerPath`,
+   `*ViewerPathElem`, `SpaceSpreadsheet.viewer_path`) or schema
+   (`SpreadsheetColumn(data_type, id)`). No accessor returns the viewer geometry or its
+   values. The Viewer is a UI feature with no API surface.
+
+   Worth keeping for a different reason: Blender's own inspection tooling reads the
+   instance domain rather than unpacking, which is the model 007 implemented.
 
 **Four real constraints on (2):**
 
