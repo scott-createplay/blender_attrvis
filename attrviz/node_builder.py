@@ -14,12 +14,19 @@ Axes (Index Switch ints — Menu sockets break on 5.0 modifier ID-props):
 """
 import bpy
 
-VERSION = "0.5.11"
+VERSION = "0.5.12"
 ENGINE_NAME = "AttrViz Engine"
 # Baked on mesh before Mesh to Points — Input Normal is (0,0,0) on points.
 AV_NORMAL_ATTR = ".attrviz_normal"
 
 DOMAINS = ("Point", "Edge", "Face", "Corner")
+# UI/sampler domain list. DOMAINS above stays FOUR — it drives the GN tree
+# (Normal bake loop, DOMAIN_TO_BLENDER, Separate Components, Mesh to Points),
+# and appending to it breaks the tree builder. Instance is a real Blender
+# attribute domain but is GPU-overlay-only: the viz GN tree realizes instances
+# at node_builder.py Realize Instances, so it cannot express instance scope.
+INSTANCE_DOMAIN = "Instance"
+UI_DOMAINS = DOMAINS + (INSTANCE_DOMAIN,)
 STYLES = ("Heat", "RGB", "Random")
 DISPLAYS = ("Markers", "Surface", "Arrows", "Tags")
 
@@ -400,15 +407,30 @@ def ensure_viz_material(name=VIZ_MATERIAL_NAME, force=False):
     return mat
 
 
+def engine_signature() -> str:
+    """Cache key for the engine graph — version AND shape.
+
+    VERSION alone is not enough. A .blend saved mid-development carries a
+    complete, correctly-stamped group built by *older code with the same
+    version number*; reusing it silently yields an engine missing whatever
+    axis was added since (e.g. a Domain with no Instance slot). Fold the axis
+    lengths in so any shape change invalidates on its own, without relying on
+    someone remembering to bump.
+    """
+    return "%s:%d:%d:%d" % (VERSION, len(UI_DOMAINS), len(STYLES),
+                            len(DISPLAYS))
+
+
 def ensure_viz_group(force=False):
     name = f"{ENGINE_NAME} {VERSION}"
     existing = bpy.data.node_groups.get(name)
-    # Reuse only a COMPLETE build. The version stamp is written last, so a
-    # group missing it died mid-build (e.g. a renamed socket identifier on a
-    # newer Blender) and is missing sockets. Reusing one turns the real error
-    # into a confusing KeyError from set_input further downstream.
+    # Reuse only a COMPLETE build of the CURRENT shape. The stamp is written
+    # last, so a group missing it died mid-build (e.g. a renamed socket
+    # identifier on a newer Blender) and lacks sockets; a group with a
+    # different signature was built by other code and lacks axes. Reusing
+    # either turns the real problem into a confusing failure downstream.
     if (existing is not None and not force
-            and existing.get("attrviz_version") == VERSION):
+            and existing.get("attrviz_version") == engine_signature()):
         return existing
     t = _tree(name)
     _sock(t, "Geometry", "OUTPUT", "NodeSocketGeometry")
@@ -465,10 +487,18 @@ def ensure_viz_group(force=False):
     _link(t, m2p_geos["Point"], pjoin.inputs["Geometry"])
     m2p_geos["Point"] = pjoin.outputs["Geometry"]
 
+    # Five UI domains, but GPU-off can only express four. Instance is a real
+    # Blender domain that this tree cannot reach — it realizes instances
+    # upstream, which destroys instance scope by construction. Give it a slot
+    # so the int round-trips through the .blend, and wire it to EMPTY
+    # geometry: showing nothing is honest, silently showing Point is not.
     domain_sw, domain_in = _menu_switch(
-        t, -620, 100, 'GEOMETRY', "Domain", DOMAINS, gi)
+        t, -620, 100, 'GEOMETRY', "Domain", UI_DOMAINS, gi)
     for dom in DOMAINS:
         _link(t, m2p_geos[dom], domain_in[dom])
+    inst_empty = _n(t, "GeometryNodePoints", -740, 240)
+    inst_empty.inputs["Count"].default_value = 0
+    _link(t, inst_empty.outputs["Points"], domain_in[INSTANCE_DOMAIN])
     domain_pts = domain_sw.outputs["Output"]
 
     # density cull (markers/arrows)
@@ -707,16 +737,23 @@ def ensure_viz_group(force=False):
         _link(t, stc.outputs["Geometry"], smat.inputs["Geometry"])
         surf_geos[dom] = smat.outputs["Geometry"]
 
-    # Same Domain socket drives which domain color is evaluated on
+    # Same Domain socket drives which domain color is evaluated on. Sized to
+    # UI_DOMAINS, not DOMAINS: the socket can carry the Instance index, and an
+    # Index Switch with no slot for it would be out of range. Instance gets
+    # empty geometry — Surface needs faces, which instances do not have here.
     surf_sw = _n(t, "GeometryNodeIndexSwitch", 1340, 560,
                  data_type='GEOMETRY')
-    while len(surf_sw.index_switch_items) < len(DOMAINS):
+    while len(surf_sw.index_switch_items) < len(UI_DOMAINS):
         surf_sw.index_switch_items.new()
-    while len(surf_sw.index_switch_items) > len(DOMAINS):
+    while len(surf_sw.index_switch_items) > len(UI_DOMAINS):
         surf_sw.index_switch_items.remove(surf_sw.index_switch_items[-1])
     _link(t, gi.outputs["Domain"], surf_sw.inputs["Index"])
     for i, dom in enumerate(DOMAINS):
         _link(t, surf_geos[dom], surf_sw.inputs[str(i)])
+    surf_empty = _n(t, "GeometryNodePoints", 1200, 700)
+    surf_empty.inputs["Count"].default_value = 0
+    _link(t, surf_empty.outputs["Points"],
+          surf_sw.inputs[str(UI_DOMAINS.index(INSTANCE_DOMAIN))])
     sf_out = surf_sw.outputs["Output"]
 
     # ── Arrows (per-viz Length + Arrow Color; Scale = thickness) ────
@@ -800,5 +837,5 @@ def ensure_viz_group(force=False):
     _link(t, ar_mat.outputs["Geometry"], disp_in["Arrows"])
     _link(t, tags_empty.outputs["Points"], disp_in["Tags"])
     _link(t, disp.outputs["Output"], go.inputs["Geometry"])
-    t["attrviz_version"] = VERSION
+    t["attrviz_version"] = engine_signature()
     return t

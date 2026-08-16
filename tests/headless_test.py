@@ -379,7 +379,7 @@ _want = {"Target", "Scope", "Attribute", "Domain", "Style", "Display"}
 check("V17a engine group has every control socket",
       _want <= eng_in, f"missing={sorted(_want - eng_in)}")
 check("V17b completed build carries the version stamp",
-      eng.get("attrviz_version") == nb.VERSION,
+      eng.get("attrviz_version") == nb.engine_signature(),
       f"stamp={eng.get('attrviz_version')!r}")
 
 # FunctionNodeCompare STRING inputs: A/B on 5.2, A_STR/B_STR on 5.0.x.
@@ -402,7 +402,7 @@ _again = nb.ensure_viz_group(force=False)
 _again_in = {i.name for i in _again.interface.items_tree
              if i.item_type == 'SOCKET' and i.in_out == 'INPUT'}
 check("V17d unstamped (half-built) group is rebuilt, not reused",
-      _again.get("attrviz_version") == nb.VERSION and "Style" in _again_in,
+      _again.get("attrviz_version") == nb.engine_signature() and "Style" in _again_in,
       f"stamp={_again.get('attrviz_version')!r} n_in={len(_again_in)}")
 
 print("\n== V8: registry + register/unregister smoke ==")

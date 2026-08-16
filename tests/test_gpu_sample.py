@@ -20,6 +20,7 @@ sys.path.insert(0, REPO)
 
 import attrviz as av  # noqa: E402
 from attrviz import gpu_color, gpu_sample, node_builder  # noqa: E402
+from attrviz import overlay_kind  # noqa: E402
 from attrviz import tags_draw  # noqa: E402
 
 PASS = 0
@@ -1194,6 +1195,223 @@ check("008 P0 frame handler registered",
 check("008 P0 epoch handler runs before vizcol sync",
       bpy.app.handlers.depsgraph_update_post.index(av._note_depsgraph_epochs)
       < bpy.app.handlers.depsgraph_update_post.index(av._sync_vizcol_active))
+
+print("\n== 007: instance-domain attributes (un-realized instances) ==")
+# Reproduces city_seed_scatter: Grid -> Distribute -> Store x3 -> Instance on
+# Points, with NO Realize. Everything lands on the instance domain.
+_i_me = bpy.data.meshes.new("InstSrc")
+_i_obj = bpy.data.objects.new("InstSrc", _i_me)
+bpy.context.collection.objects.link(_i_obj)
+_it = bpy.data.node_groups.new("InstGN", "GeometryNodeTree")
+_it.interface.new_socket("Geometry", in_out='OUTPUT',
+                         socket_type="NodeSocketGeometry")
+_igo = _it.nodes.new("NodeGroupOutput")
+_igrid = _it.nodes.new("GeometryNodeMeshGrid")
+_igrid.inputs["Vertices X"].default_value = 4
+_igrid.inputs["Vertices Y"].default_value = 4
+_igrid.inputs["Size X"].default_value = 10.0
+_igrid.inputs["Size Y"].default_value = 10.0
+_idist = _it.nodes.new("GeometryNodeDistributePointsOnFaces")
+_idist.inputs["Density"].default_value = 1.0
+_istore = _it.nodes.new("GeometryNodeStoreNamedAttribute")
+_istore.data_type = 'FLOAT'
+_istore.domain = 'POINT'
+_istore.inputs["Name"].default_value = "height"
+_iidx = _it.nodes.new("GeometryNodeInputIndex")
+_icube = _it.nodes.new("GeometryNodeMeshCube")
+# Base-shift the prototype so its pivot sits on its BASE, as real scatters do
+# (city_seed_scatter does exactly this). Without it the cube is centred on its
+# own pivot and the centroid-vs-pivot distinction is invisible.
+_ishift = _it.nodes.new("GeometryNodeTransform")
+_ishift.inputs["Translation"].default_value = (0.0, 0.0, 0.5)
+_iiop = _it.nodes.new("GeometryNodeInstanceOnPoints")
+_it.links.new(_igrid.outputs["Mesh"], _idist.inputs["Mesh"])
+_it.links.new(_idist.outputs["Points"], _istore.inputs["Geometry"])
+_it.links.new(_iidx.outputs["Index"], _istore.inputs["Value"])
+_it.links.new(_istore.outputs["Geometry"], _iiop.inputs["Points"])
+_it.links.new(_icube.outputs["Mesh"], _ishift.inputs["Geometry"])
+_it.links.new(_ishift.outputs["Geometry"], _iiop.inputs["Instance"])
+_it.links.new(_iiop.outputs["Instances"], _igo.inputs[0])   # NO Realize
+_imd = _i_obj.modifiers.new("gn", 'NODES')
+_imd.node_group = _it
+bpy.context.view_layer.update()
+_idg = bpy.context.evaluated_depsgraph_get()
+_idg.update()
+_igs = _i_obj.evaluated_get(_idg).evaluated_geometry()
+_icloud = gpu_sample.instances_cloud(_igs)
+_n_inst = len(_icloud.points) if _icloud is not None else 0
+
+check("007 instances_cloud finds the component", _icloud is not None)
+check("007 top-level mesh really is empty (the failure case)",
+      len(_igs.mesh.vertices) == 0 if _igs.mesh else True)
+
+_iby, _ihas_faces = av.attributes_by_domain(_i_obj)
+_inst_names = [n for n, _t in _iby.get("Instance", [])]
+check("007 height listed under Instance", "height" in _inst_names,
+      str(_inst_names))
+check("007 nothing bogus under Point",
+      not [n for n, _t in _iby.get("Point", [])], str(_iby.get("Point")))
+check("007 Index/Position intrinsics on Instance",
+      "Index" in _inst_names and "Position" in _inst_names, str(_inst_names))
+check("007 no Normal intrinsic on Instance (instances have none)",
+      "Normal" not in _inst_names, str(_inst_names))
+check("007 instance_transform hidden", "instance_transform" not in _inst_names)
+check("007 id kept (INT -> hash colour)", "id" in _inst_names, str(_inst_names))
+
+_iviz = av.add_visualizer(bpy.context, target=_i_obj, attribute="height",
+                          domain="Instance", style="Heat", display="Markers")
+_imd_viz = av.viz_modifier(_iviz)
+check("007 Domain round-trips as Instance",
+      node_builder.menu_input_name(_imd_viz, "Domain") == "Instance",
+      str(node_builder.menu_input_name(_imd_viz, "Domain")))
+
+_ires = gpu_sample.sample_visualizer_targets(_imd_viz)
+check("007 sampling returns data", _ires is not None)
+if _ires is not None:
+    _ipos, _ivals, _idt = _ires
+    check("007 one sample per instance, not per realized vert",
+          len(_ipos) == _n_inst, f"{len(_ipos)} vs {_n_inst} instances")
+    check("007 dtype is the stored FLOAT", _idt == 'FLOAT', str(_idt))
+    check("007 values are the real per-instance values",
+          len(set(np.round(np.asarray(_ivals), 4))) > 1)
+
+    # Positions must come from instance_transform, not the `position`
+    # attribute — on 5.2 that reads uninitialised memory on all but a lucky
+    # first call. Ground truth is the depsgraph's own instance matrices.
+    _truth = np.array(
+        [list(di.matrix_world.translation)
+         for di in bpy.context.evaluated_depsgraph_get().object_instances
+         if di.is_instance and di.parent
+         and di.parent.original == _i_obj],
+        dtype=np.float32)
+    # Sampled points are CENTROIDS, so they sit at the depsgraph pivot plus
+    # the prototype's local centre — here (0, 0, 0.5) from the base-shift.
+    # Still validated against the depsgraph rather than against the attribute
+    # the implementation reads, so a wrong transform convention is caught.
+    _off = np.sort(np.asarray(_ipos), axis=0) - np.sort(_truth, axis=0)
+    check("007 positions = depsgraph pivot + prototype centroid offset",
+          len(_truth) == len(_ipos)
+          and np.allclose(_off, _off[0], atol=1e-3)
+          and abs(float(_off[0][2]) - 0.5) < 1e-3,
+          f"truth={len(_truth)} sampled={len(_ipos)} offset={_off[0]}")
+    check("007 positions are not garbage/zero",
+          float(np.abs(np.asarray(_ipos)).max()) > 1e-4
+          and float(np.abs(np.asarray(_ipos)).max()) < 1e6,
+          str(np.asarray(_ipos)[:1]))
+
+    # Sample AGAIN. The original bug only appeared on the second evaluated
+    # geometry in a process, so a single-shot test cannot see it.
+    _ires2 = gpu_sample.sample_visualizer_targets(_imd_viz)
+    check("007 second sample is identical (not a once-only read)",
+          _ires2 is not None
+          and np.allclose(np.asarray(_ires2[0]), np.asarray(_ipos), atol=1e-4),
+          "second read drifted")
+
+# Other domains must not invent instance data.
+for _d in ("Edge", "Face", "Corner"):
+    check(f"007 {_d} on an instance-only object samples nothing",
+          gpu_sample.sample_evaluated(_i_obj, "height", _d) is None)
+
+# --- the UI layer, which the data-layer tests above cannot see -------------
+# The menu builds operator buttons and assigns op.domain. If that enum lacks
+# "Instance" the assignment raises AFTER the button exists, so the menu
+# truncates at whatever drew first and looks like "no attributes found".
+_op_domains = [i.identifier for i in
+               bpy.ops.attrviz.add.get_rna_type()
+               .properties["domain"].enum_items]
+check("007 add-operator domain enum accepts every UI domain",
+      all(d in _op_domains for d in node_builder.UI_DOMAINS),
+      f"enum={_op_domains}")
+_obj_domains = [i.identifier for i in
+                bpy.types.Object.bl_rna.properties["attrviz_domain"].enum_items]
+check("007 panel Domain enum accepts every UI domain",
+      all(d in _obj_domains for d in node_builder.UI_DOMAINS),
+      f"enum={_obj_domains}")
+# --- Instance positions are CENTROIDS, and Surface paints the instances ---
+_i_protos = None
+_i_geo = _i_obj.evaluated_get(bpy.context.evaluated_depsgraph_get()) \
+    .evaluated_geometry()
+_i_cloud = gpu_sample.instances_cloud(_i_geo)
+_i_mats = gpu_sample._instance_transforms(_i_cloud)
+_i_pivots = np.ascontiguousarray(_i_mats[:, 3, :3])
+_i_cent = gpu_sample._instance_positions(_i_cloud, _i_geo)
+check("007 centroid differs from the instance pivot",
+      not np.allclose(_i_cent, _i_pivots, atol=1e-4),
+      "centroid == pivot: markers would sit inside the geometry")
+check("007 centroid sits inside the instance's own height span",
+      float(_i_cent[:, 2].min()) > float(_i_pivots[:, 2].min()) - 1e-4,
+      str(np.round(_i_cent[:3], 3)))
+
+_i_surf = gpu_sample.build_surface_tris(_i_mdviz) \
+    if (_i_mdviz := av.viz_modifier(av.add_visualizer(
+        bpy.context, target=_i_obj, attribute="height", domain="Instance",
+        style="Heat", display="Surface"))) else None
+check("007 Surface on Instance builds geometry", _i_surf is not None)
+if _i_surf is not None:
+    _sp, _scv, _sdt, _snt = _i_surf
+    check("007 Surface tris = instances x prototype tris",
+          _snt == _n_inst * 12, f"{_snt} vs {_n_inst}*12")
+    check("007 Surface corner count is 3 per tri",
+          len(_sp) == _snt * 3, f"{len(_sp)} vs {_snt * 3}")
+    check("007 Surface carries one distinct value per instance",
+          len(set(np.round(np.asarray(_scv), 4))) == _n_inst,
+          f"{len(set(np.round(np.asarray(_scv), 4)))} vs {_n_inst}")
+    check("007 Surface spans the instanced geometry, not the origin",
+          float(np.asarray(_sp)[:, 2].max()) > 0.9,
+          str(np.round(np.asarray(_sp).max(axis=0), 2)))
+
+# Instance markers must draw OVER the geometry: the centroid is inside the
+# instanced geometry, so a depth test would hide every one of them.
+_mk_inst = av.add_visualizer(bpy.context, target=_i_obj, attribute="height",
+                             domain="Instance", style="Heat",
+                             display="Markers")
+_mk_pt = av.add_visualizer(bpy.context, target=_p0_obj, attribute="heat",
+                           domain="Point", style="Heat", display="Markers")
+_rows = gpu_overlay._gpu_visualizers(bpy.context.scene)
+_geo_rows = [r for r in _rows
+             if overlay_kind.kind(r[2]) == "geometric"]
+_tested, _on_top = gpu_overlay._split_geometric_depth(_geo_rows)
+_on_top_names = [r[0].name for r in _on_top]
+_tested_names = [r[0].name for r in _tested]
+check("007 Instance markers are drawn on top (no depth test)",
+      _mk_inst.name in _on_top_names, str(_on_top_names))
+check("007 Point markers keep the depth test",
+      _mk_pt.name in _tested_names, str(_tested_names))
+check("007 nothing lands in both lists",
+      not (set(_on_top_names) & set(_tested_names)))
+
+# The RMB menu explains WHY mesh domains are absent on un-realized instances
+# rather than silently showing only Instance. Guard the condition that drives
+# that label, so it cannot quietly stop firing.
+_iby2, _ = av.attributes_by_domain(_i_obj)
+check("007 un-realized instances: mesh domains genuinely empty",
+      not any(_iby2.get(d) for d in node_builder.DOMAINS),
+      str({d: _iby2.get(d) for d in node_builder.DOMAINS}))
+check("007 un-realized instances: Instance domain populated",
+      bool(_iby2.get(node_builder.INSTANCE_DOMAIN)))
+check("007 realize-hint condition fires for this object",
+      bool(_iby2.get(node_builder.INSTANCE_DOMAIN))
+      and not any(_iby2.get(d) for d in node_builder.DOMAINS))
+# ...and does NOT fire for an ordinary mesh, which must keep its intrinsics.
+_pby, _ = av.attributes_by_domain(_p0_obj)
+check("007 ordinary mesh still lists Point intrinsics",
+      "Index" in [n for n, _t in _pby.get("Point", [])]
+      and "Position" in [n for n, _t in _pby.get("Point", [])],
+      str([n for n, _t in _pby.get("Point", [])]))
+check("007 realize-hint does NOT fire for an ordinary mesh",
+      not (bool(_pby.get(node_builder.INSTANCE_DOMAIN))
+           and not any(_pby.get(d) for d in node_builder.DOMAINS)))
+
+_menu_classes = {
+    "Point": "ATTRVIZ_MT_domain_point", "Edge": "ATTRVIZ_MT_domain_edge",
+    "Face": "ATTRVIZ_MT_domain_face", "Corner": "ATTRVIZ_MT_domain_corner",
+    "Instance": "ATTRVIZ_MT_domain_instance",
+}
+check("007 every UI domain has a registered menu class",
+      all(hasattr(bpy.types, _menu_classes.get(d, ""))
+          for d in node_builder.UI_DOMAINS),
+      str([d for d in node_builder.UI_DOMAINS
+           if not hasattr(bpy.types, _menu_classes.get(d, ""))]))
 
 print(f"\n== Result: {PASS} passed, {FAIL} failed ==")
 if FAIL:

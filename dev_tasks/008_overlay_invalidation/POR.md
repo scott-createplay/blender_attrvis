@@ -148,7 +148,7 @@ Cost after P0: 1M scrub tick ~22.7 ms marginal (from 14.5 ms — this is correct
 
   Two deliberate stops: **face centres reach only 9.4×** because there is no cached centre array — going further means computing from corner verts + polygon offsets in numpy, real work for ~9 ms. And **corner normals stay smooth, not split** — `me.corner_normals` exists and is a single fast read, but returns split normals, which changes what Arrows draw on a sharp-edged mesh. Behaviour preserved with a test asserting it; switching is a product call.
 - [x] **Confirmed on evaluated (GN-output) meshes**, not just plain datablocks — byte-identical, and the read reflects the modifier. 14 checks in `tests/test_gpu_sample.py` compare every reader against the original per-element implementation, kept in the test as the reference, plus empty-mesh guards and a negative case per primitive.
-- [ ] Move the world transform to a shader uniform instead of a numpy pass over N×3 (7.4 ms at 1M).
+- [ ] Move the world transform to a shader uniform instead of a numpy pass over N×3 (7.4 ms at 1M). **Not the one-liner this originally implied.** `_to_world` runs *per watched object* (`gpu_sample.py:404`, `:421`) before the multi-object concat, so a concatenated buffer has no single matrix to hand a uniform. Either add a single-object fast path — the common case, and low risk — or batch per object. Scope it before starting.
 - [ ] Reuse preallocated buffers when the element count is unchanged (~12 MB churn per tick at 1M verts).
 - [ ] Split the position cache from the value cache with independent epochs — an attribute-only scrub should not re-read positions. **Low priority after item 1**: the attribute read is already 0.1 ms; it is the position read that costs, and item 1 takes it to 0.29 ms.
 - [ ] Re-run the harness after each; keep the ones that pay.
@@ -190,11 +190,17 @@ Two Surface visualizers on the same watch set produce **byte-identical geometry*
 - [ ] **Make precedence explicit before optimising on it.** Today the winner is an implicit consequence of `visualizers(scene)` iteration order. Skipping evaluation of a viz the user can still see enabled in the panel, with no indication why it shows nothing, trades a perf win for a "my visualizer vanished" bug. Surface the winner in the panel (or define and document the order) as part of this item, not after.
 - [ ] Tests: two Surface viz on one target → one sample call, later-drawn colours win; partial-overlap watch sets → both still evaluated; two geometric viz with different Density → both evaluated.
 
-### P3 — Closeout
+### P3 — Closeout ✅
 
-- [ ] Regression suites green.
-- [ ] New perf baseline committed; old JSONs marked superseded (below).
-- [ ] GUI: `mock_city.blend`, scrub `Seed` — markers track the buildings live.
+- [x] Regression suites green — `headless_test` 34, `test_gpu_sample` 188, `test_watch_collection` 45, `test_overlay_kinds`, `test_surface_direct` 11.
+- [x] New perf baseline committed (`references/perf/gpu_vs_gn_scrub.txt`); old JSONs marked superseded (`../001_gpu_overlay/references/perf/SUPERSEDED.md`).
+- [x] GUI confirmed: `mock_city.blend`, scrub `Seed` — markers track the buildings live.
+
+**Remaining phases are evidence-gated, not scheduled.** P1 must not be built until a real
+scene exceeds the budget; at 160k the marginal cost is now ~2 ms, and `mock_city` is ~2k
+verts, so nothing observed so far argues for a throttle. Building the stress scene
+(`examples/build_attr_stress_scene.py`) is the prerequisite for that evidence — the city
+tool cannot yet produce one (see `blender_camera_distribution_pkg` backlog **GD**/**SD**).
 
 ---
 

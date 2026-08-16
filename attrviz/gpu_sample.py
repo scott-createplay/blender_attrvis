@@ -74,6 +74,125 @@ def _geom_has_points(geom) -> bool:
     return _is_pointcloud_data(geom) and _point_count(geom) > 0
 
 
+def instances_cloud(gs):
+    """The evaluated instances component, or None.
+
+    On 5.2 this is ``GeometrySet.instances_pointcloud()`` — a METHOD, not one
+    of the ``mesh`` / ``curves`` / ``pointcloud`` properties. That is why
+    ``getattr(gs, "instances", None)`` silently returns None and adding
+    "instances" to the component tuple does nothing. Tolerates either shape so
+    a future rename does not break discovery outright.
+    """
+    if gs is None:
+        return None
+    src = getattr(gs, "instances_pointcloud", None)
+    if src is None:
+        return None
+    try:
+        pc = src() if callable(src) else src
+    except Exception:
+        return None
+    if pc is None:
+        return None
+    try:
+        return pc if len(pc.points) else None
+    except Exception:
+        return None
+
+
+def _instance_transforms(pc):
+    """(N, 4, 4) instance matrices, row-major (translation in row 3).
+
+    NOT the ``position`` attribute. On 5.2 that component reads UNINITIALISED
+    MEMORY — garbage (9.1e+30) or zeros — on every call but a lucky first one
+    in a fresh process, while every other attribute on the same cloud
+    (``instance_transform``, ``.reference_index``, user attributes) reads
+    correctly and stably. Releasing references and forcing gc does not restore
+    it, so the usual "hold the GeometrySet" rule does not apply.
+    """
+    n = _point_count(pc)
+    if n == 0:
+        return np.zeros((0, 4, 4), dtype=np.float32)
+    xf = np.empty(n * 16, dtype=np.float32)
+    if not _attr_into(pc, "instance_transform", "value", xf):
+        return np.zeros((n, 4, 4), dtype=np.float32)
+    return xf.reshape(-1, 4, 4)
+
+
+def _instance_reference_index(pc) -> np.ndarray:
+    n = _point_count(pc)
+    idx = np.zeros(n, dtype=np.int32)
+    _attr_into(pc, ".reference_index", "value", idx)
+    return idx
+
+
+def _instance_prototypes(geo):
+    """Per-reference prototype geometry: [(verts Vx3, tri_verts Tx3), ...].
+
+    MUST be read while the caller still holds ``geo`` — the referenced Mesh is
+    freed with it ("StructRNA of type Mesh has been removed").
+    """
+    out = []
+    try:
+        refs = geo.instance_references()
+    except Exception:
+        return out
+    for ref in refs:
+        rm = getattr(ref, "mesh", None)
+        if rm is None or len(rm.vertices) == 0:
+            out.append(None)
+            continue
+        verts = _point_positions(rm)
+        tri_v = np.zeros((0, 3), dtype=np.int32)
+        try:
+            rm.calc_loop_triangles()
+            n_t = len(rm.loop_triangles)
+            if n_t:
+                buf = np.empty(n_t * 3, dtype=np.int32)
+                rm.loop_triangles.foreach_get("vertices", buf)
+                tri_v = buf.reshape(-1, 3)
+        except Exception:
+            pass
+        out.append((verts, tri_v))
+    return out
+
+
+def _apply_instance_xform(local, mats):
+    """Row-vector transform: (N, K, 3) local → world under (N, 4, 4) mats."""
+    return (np.einsum('nkj,njm->nkm', local, mats[:, :3, :3])
+            + mats[:, None, 3, :3])
+
+
+def _instance_positions(pc, geo) -> np.ndarray:
+    """One sample point per instance — the CENTROID of its geometry.
+
+    Not the instance pivot. The pivot is an artifact of how the prototype was
+    authored: for a building box it sits on the base, so a marker there lands
+    inside the bottom face and is occluded by the very geometry it describes.
+    The meaningful point is the middle of the instanced geometry.
+
+    Uses the prototype's bounding-box centre rather than the vertex mean,
+    which would drift toward finely subdivided regions.
+    """
+    n = _point_count(pc)
+    if n == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    mats = _instance_transforms(pc)
+    ridx = _instance_reference_index(pc)
+    protos = _instance_prototypes(geo)
+    centres = np.zeros((max(len(protos), 1), 3), dtype=np.float32)
+    for i, proto in enumerate(protos):
+        if proto is None:
+            continue
+        verts = proto[0]
+        if len(verts):
+            centres[i] = (verts.min(axis=0) + verts.max(axis=0)) * 0.5
+    np.clip(ridx, 0, len(centres) - 1, out=ridx)
+    local = centres[ridx][:, None, :]                     # (N, 1, 3)
+    return np.ascontiguousarray(
+        _apply_instance_xform(local, mats)[:, 0, :])
+
+
 def _evaluated_source(obj: bpy.types.Object):
     """Evaluated mesh and/or point-cloud components.
 
@@ -368,11 +487,37 @@ def _sample_evaluated_impl(
     *,
     world_space: bool = True,
 ) -> Optional[SampleResult]:
-    domain_ui = domain_ui if domain_ui in node_builder.DOMAINS else "Point"
-    blender_dom = node_builder.DOMAIN_TO_BLENDER[domain_ui]
+    domain_ui = domain_ui if domain_ui in node_builder.UI_DOMAINS else "Point"
 
     with _span("sample.depsgraph_source"):
         ev, me, pc, _hold = _evaluated_source(obj)
+
+    if domain_ui == node_builder.INSTANCE_DOMAIN:
+        # Un-realized instances. The component is a PointCloud whose
+        # attributes self-report POINT; `position` is the instance origin in
+        # object space (verified against depsgraph.object_instances), so the
+        # normal _to_world step applies. Reading here is strictly more
+        # faithful than realizing: Realize DUPLICATES each instance value onto
+        # every vertex of its prototype, so realized Markers draw N coincident
+        # markers per instance where this draws one.
+        inst = instances_cloud(_hold)
+        if inst is None:
+            return None
+        with _span("sample.positions.Instance"):
+            positions = _instance_positions(inst, _hold)
+        with _span("sample.read_attr"):
+            if node_builder.is_intrinsic(attr):
+                values, dtype = _read_cloud_intrinsic(inst, attr, cos=positions)
+            else:
+                values, dtype = _read_attr(inst, attr, 'POINT', len(positions))
+        if values is None:
+            return None
+        if world_space:
+            with _span("sample.to_world"):
+                positions = _to_world(positions, ev.matrix_world)
+        return positions, values, dtype
+
+    blender_dom = node_builder.DOMAIN_TO_BLENDER[domain_ui]
 
     if _geom_has_verts(me):
         with _span(f"sample.positions.{domain_ui}"):
@@ -716,6 +861,54 @@ def _build_surface_tris_impl(
     col_chunks = []
     dtype = None
     n_tris_total = 0
+
+    if domain_ui == node_builder.INSTANCE_DOMAIN:
+        # Surface on the instance domain paints each instance's REFERENCED
+        # geometry with that instance's value — the useful reading of
+        # "surface" here, and the reason not to make the user add a Realize
+        # node. Realize would give the same picture at 8x the samples and the
+        # wrong granularity; this transforms the prototype in numpy instead,
+        # mutating nothing.
+        for obj in meshes:
+            ev, _me, _pc, hold = _evaluated_source(obj)
+            inst = instances_cloud(hold)
+            if inst is None:
+                continue
+            res = sample_evaluated(obj, attr, domain_ui, world_space=False)
+            if res is None:
+                continue
+            _p, values, dt = res
+            dtype = dt
+            values = np.asarray(values)
+            mats = _instance_transforms(inst)
+            ridx = _instance_reference_index(inst)
+            protos = _instance_prototypes(hold)   # read while `hold` is alive
+            if not protos:
+                continue
+            np.clip(ridx, 0, len(protos) - 1, out=ridx)
+            for r, proto in enumerate(protos):
+                if proto is None:
+                    continue
+                verts, tri_v = proto
+                if len(tri_v) == 0:
+                    continue
+                sel = np.flatnonzero(ridx == r)
+                if sel.size == 0:
+                    continue
+                corners = verts[tri_v].reshape(-1, 3)          # (T*3, 3)
+                local = np.broadcast_to(
+                    corners, (sel.size, corners.shape[0], 3))
+                world = _apply_instance_xform(local, mats[sel])
+                world = world.reshape(-1, 3)
+                world = _to_world(world, ev.matrix_world)
+                pos_chunks.append(world.astype(np.float32))
+                col_chunks.append(
+                    np.repeat(values[sel], corners.shape[0], axis=0))
+                n_tris_total += sel.size * len(tri_v)
+        if not pos_chunks or dtype is None:
+            return None
+        return (np.concatenate(pos_chunks, axis=0),
+                np.concatenate(col_chunks, axis=0), dtype, n_tris_total)
 
     for obj in meshes:
         ev, me, _pc, _hold = _evaluated_source(obj)

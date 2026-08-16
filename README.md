@@ -81,7 +81,7 @@ blender --command extension install-file --repo user_default --enable build/attr
 ```
 
 Developed against **Blender 5.0+** (tested on 5.0.1 and 5.2.0). Current
-addon version: **0.5.11**.
+addon version: **0.5.12**.
 
 ## Tests
 

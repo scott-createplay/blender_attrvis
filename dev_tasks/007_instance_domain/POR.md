@@ -80,35 +80,242 @@ Do **not** realize instances to sample them. The whole point is reading the chea
 
 ### P0 — Probe + discovery
 
-- [ ] **API probe across versions.** `instances_pointcloud()` / `instance_references()` verified on 5.2.0 only. Manifest floor is `blender_version_min = "5.0.0"`. Confirm the spelling and the method-vs-property shape on 5.0/5.1, or raise the floor. Lock findings in the POR table. Everything below assumes the 5.2 shape.
-- [ ] Probe whether `position` on the instances cloud is the instance **origin** in object space, and whether it agrees with `depsgraph.object_instances[].matrix_world`. If `position` is not sufficient, derive from `instance_transform` translation. Do not guess — markers land wrong and it looks like a depth bug.
+**Probes resolved (5.2.0).** Three unknowns closed before implementation:
+
+1. **⚠️ `position` on the instances cloud is UNRELIABLE — use `instance_transform`.** The first read in this POR matched the depsgraph exactly, and that was luck. On 5.2 the `position` attribute of the instances pointcloud reads **uninitialised memory** — `9.1e+30` or zeros — on every call except a lucky first `evaluated_geometry()` in a fresh process. Every *other* attribute on the same cloud (`instance_transform`, `id`, and user attributes like `height`) reads correctly and stably, so the bug is specific to `position`, which is presumably synthesised per call into a buffer that is not always filled.
+
+   Releasing references and forcing `gc.collect()` does **not** restore it — this is not a lifetime/GC issue, so the usual "hold the GeometrySet" rule does not help.
+
+   **Fix:** derive origins from `instance_transform` (FLOAT4X4, stored **row-major** → translation is row 3). Verified stable across repeated calls and equal to `depsgraph.object_instances[].matrix_world` translations. Values are object-local, so the existing `_to_world` step applies as for meshes and clouds.
+
+   **Testing lesson:** a single-shot test cannot see this — the first read is the one that works. The regression test samples **twice** and compares against the depsgraph's own matrices rather than against the `position` attribute it is meant to replace.
+2. **The Domain "menu socket" wrinkle does not exist.** `_menu_switch` builds a plain `NodeSocketInt` (min 0, max 3) plus a name→index dict on the tree (`attrviz_menu_Domain` = `{Point:0, Edge:1, Face:2, Corner:3}`). Setting `Domain = 4` stores and reads back fine; `menu_input_name` just returns the raw `4` for lack of a map entry. **The int round-trips through the .blend for free** — no ID-prop or menu-socket problem to solve.
+3. **The values are the real values.** Un-realized instance-domain `height` is byte-identical to what Realize duplicates onto 8 verts per building (`realized per-building values == instance-domain values: True`). Realize *duplicates*; it does not compute. Reading the instance domain is strictly more faithful.
+
+- [ ] **Version floor — undecided, cannot be tested here.** Only Blender 5.2 is installed; no 5.0/5.1 binary on the machine. `blender_version_min = "5.0.0"` is therefore unverified for `instances_pointcloud()`. Either raise the floor to what is actually tested, or ship and document the risk. **Decision required before release, not before implementation.**
 - [ ] `evaluated_attributes`: add the instances component via a `_instances_cloud(gs)` helper that tolerates method-or-property and returns `None` on failure. Tag its rows with a synthetic `INSTANCE` domain so `attributes_by_domain` can route them.
 - [ ] `attributes_by_domain`: source `_domain_has_elements` from the **geometry set**, not `ev.data`. This alone restores intrinsics on any GN object whose top-level mesh is empty (a bug wider than instances).
 - [ ] `_domain_has_elements`: Instance true iff the instances cloud has points; Point/Edge/Face/Corner unaffected by its presence.
 - [ ] Tests: headless fixture reproducing `city_seed_scatter` (Grid → Distribute → Store ×3 → Instance on Points, no Realize) — `attributes_by_domain` returns `height`/`width`/`depth` under Instance and nothing under Point.
 
-### P1 — Menu + sampling
+### P1 — Menu + sampling ✅
 
-- [ ] `ATTRVIZ_MT_domain_instance` menu class; `ATTRVIZ_MT_visualize` lists Instance when non-empty (skip-empty behaviour already generic).
-- [ ] Intrinsics on Instance: Index and Position yes. **Normal no** — instances have no normal; do not invent one (006 precedent for clouds).
-- [ ] Decide and implement the `instance_transform` / `id` filter (lock 7).
-- [ ] `_evaluated_source` returns the instances cloud; `sample_evaluated(obj, name, "Instance")` returns the same `(pos, values, dtype)` shape, world-space applied.
-- [ ] **Resolve the viz-object Domain input.** The visualizer's GN modifier stores Domain as a menu socket with four entries; Instance needs to round-trip through it (or be stored beside it) so a saved .blend reopens correctly. Mechanism unknown — probe before designing. This is the one place the overlay-only lock leaks into the GN group.
-- [ ] `watch_fingerprint`: instance count, so adding/removing instances re-samples.
-- [ ] Markers / Arrows / Tags on Instance. Surface on Instance → empty, no crash.
+- [x] `ATTRVIZ_MT_domain_instance` menu class + one entry in the `menus` tuple. Skip-empty was already generic, so a plain mesh never grows a spurious Instance row.
+- [x] **Domain plumbing.** `node_builder.DOMAINS` stays four; `UI_DOMAINS = DOMAINS + ("Instance",)` added *in node_builder* so `__init__` and `gpu_sample` share one definition. `attrviz_menu_Domain` extended with `Instance: 4`, socket `max_value` bumped, and a fifth Index Switch item on **both** the Domain and Surface switches wired to empty geometry.
+- [x] Intrinsics on Instance: Index and Position. **No Normal** (006 precedent).
+- [x] Attribute filter: `instance_transform` hidden; **`id` kept** for the 005 hash path.
+- [x] Instances read as a fourth component via `gpu_sample.instances_cloud()`.
+- [x] `watch_fingerprint` unchanged — 008's epochs already cover it.
+- [x] Markers / Arrows / Tags on Instance; Surface implemented properly (below).
 
-### P2 — UI honesty
+**Three bugs found in the process, all worth remembering:**
 
-- [ ] Panel label when a watched object has instance-domain attributes and the chosen domain has none — the quiet-case guard.
-- [ ] Surface on Instance-only → label with reason, not a silent blank (same pattern as Surface-on-Edge and 006's point-only).
-- [ ] Nested instances: if depth > 1 is detected, say so rather than silently reading only the top level.
+1. **The UI holds its own copies of the domain list.** `ATTRVIZ_OT_add.domain`, `_DOMAIN_ITEMS`, and the `attrviz_domain` get/set pair were each built from `DOMAINS`. Assigning `op.domain = "Instance"` raised *after* `layout.operator()` had already created the button, so the menu drew "Intrinsic → Index" and then silently truncated — looking exactly like "no attributes found". All now use `UI_DOMAINS`. **Tests must cover the operator enum, not just `attributes_by_domain`**: every 007 data-layer test passed while the menu was broken, because they call `add_visualizer()` and bypass the operator entirely.
+2. **The engine cache key must encode graph SHAPE, not just version.** A `.blend` saved mid-development carried a correctly-stamped `AttrViz Engine 0.5.11` built by older code with four domains; it passed the stamp check and was reused. `engine_signature()` now folds in the axis lengths, so a shape change invalidates without relying on someone remembering to bump.
+3. **Instance `position` reads uninitialised memory** — see P0.
+
+### P1b — Surface, centroids, depth ✅
+
+- [x] **Surface on Instance paints the instanced geometry.** First wired to empty geometry on the reasoning "instances have no faces" — true at the top level, wrong for the user's need. It now transforms each instance's referenced prototype into the overlay's own numpy buffers and paints it with that instance's value: 33 instances × 12 tris → 396 tris, 33 distinct values. Same picture Realize gives, at the right granularity, mutating nothing. The existing Surface mute already handles the source (`TEXTURED` → `BOUNDS` → restore).
+- [x] **Sample point is the CENTROID, not the pivot.** The pivot is an authoring artifact — `base_shift` puts it on the building's base, so every marker sat at z=0 *inside* the geometry it described. Now the prototype's bounding-box centre, transformed: z spans 4.09–34.36 instead of 0. Bbox centre rather than vertex mean, which would drift toward subdivided regions.
+- [x] **Instance geometric ink draws with the depth test OFF.** A centroid is inside its geometry by construction, so depth-testing always hides it. Mesh domains keep the depth test — their ink sits *on* the surface and occlusion is meaningful. Split into `_split_geometric_depth()` so the rule is testable without a GPU context.
+
+### P2 — UI honesty ✅ (partial)
+
+- [x] Menu explains why mesh domains are absent on un-realized instances: *"Point / Edge / Face / Corner: no elements — geometry is instanced, add Realize Instances to unpack, or read it on Instance."* Guarded by tests on the triggering condition, and asserted **not** to fire for ordinary meshes.
+- [ ] Surface on Instance-only → now builds real geometry, so the empty-label case no longer applies. Revisit if a prototype has no faces.
+- [ ] Nested instances: detectable (below) but not yet reported.
+- [ ] **Unified-value readout.** Still wanted — see "What survives" below.
 
 ### P3 — Closeout
 
-- [ ] Three regression suites green (`headless_test.py`, `test_gpu_sample.py`, `test_watch_collection.py`).
-- [ ] GUI: `mock_city.blend` with the Realize node **removed** — RMB → Instance → height draws 26 markers, one per building; Tags label each building once.
-- [ ] Example scene committed (`examples/build_attr_instances_scene.py`), matching the 006 pattern.
-- [ ] Commit only if asked.
+- [x] All five suites green (`headless_test` 34, `test_gpu_sample` 225, `test_watch_collection` 45, `test_overlay_kinds`, `test_surface_direct` 11).
+- [x] GUI confirmed on `mock_city.blend` with Realize removed: Instance menu lists `Index, Position, depth, height, id, width`; Surface paints the buildings; markers sit at centroids over the geometry.
+- [ ] Example scene (`examples/build_attr_instances_scene.py`) — `mock_city` serves as the fixture for now (below).
+
+---
+
+## Packed vs realized — the semantics, measured
+
+The two states hold attributes in genuinely different places:
+
+```
+PACKED   <GeometrySet: 0 verts, 33 instances>
+  instance-domain : id, height, width, depth      ← readable now, correct granularity
+  prototype POINT : wear, facade_z                ← inside the reference, not on this object
+  top-level mesh  : 0 verts
+
+REALIZED <GeometrySet: 1848 verts, 1782 faces>
+  POINT: depth, facade_z, height, id, sharp_face, wear, width
+    height    n=1848  distinct=33    constant-within-building=True
+    wear      n=1848  distinct=11    constant-within-building=False
+    facade_z  n=1848  distinct=4     constant-within-building=False
+```
+
+Realize does two different things at once and the result cannot tell them apart: it **promotes and duplicates** instance attributes (`height` → 33 real values smeared over 1,848 points) and **copies** prototype attributes per instance (`wear`, genuinely per-vertex). Afterwards both sit on `Point` as identical-looking floats.
+
+Consequences: Surface-on-Point of a promoted attribute looks *correct* (colouring faces by a smeared value is the picture you want), but Markers draws 56 coincident markers per building and Tags labels each one 56 times.
+
+**Realize destroys scope, and Blender gives it nowhere to go.** An attribute is `(name, domain, data_type)` and nothing else — `data_type`, `domain`, `is_internal`, `is_required` are all read-only, and attributes **reject** custom ID properties (`TypeError: id properties not supported for this type`). `name` is the only writable field, so the only native tagging mechanism is a naming convention, which is what Blender itself uses for internals (`.corner_vert`). Contrast Houdini, where scope is structural (point / vertex / prim / detail are separate containers) and therefore cannot be lost.
+
+---
+
+## Rejected: recovering scope after Realize
+
+Three routes were explored and all are rejected. **Do not re-propose without reading this.**
+
+**Value inference (per-shell constancy).** If every element of a shell carries one value, the attribute was instance-scope. Measured and it works — at detail=32 / 190,344 verts: `height` per-shell **True** in 0.60 ms, `wear` **False**, `facade_z` **False**. But a cardinality shortcut gets it backwards: `facade_z` has 32 distinct in 190k (ratio 0.0002) versus `height`'s 33 (0.0002) — *lower*, despite being genuinely per-vertex. Only a true per-shell test separates them, and that needs shell identity, which is not free: after Realize the promoted `id` is **unique per point** (190,340 distinct), so there is no grouping attribute. It requires a topology/island pass.
+
+**Static graph analysis.** More deterministic, and the branch split is clean — traced on `city_seed_scatter`:
+
+```
+iop.Points   -> depth, width, height     (become instance-scope)
+iop.Instance -> facade_z, wear           (stay element-scope)
+```
+
+Note **all five are upstream of Realize and all five are `domain=POINT`**, so "upstream of Realize" is *not* the rule — the rule is which input of Instance on Points the path traverses. It degrades on nested node groups, Join Geometry giving two paths, Switch nodes, muted nodes, and attributes that were never stored by a node at all. Its saving grace is that it can answer *unknown*; value inference always answers confidently.
+
+**Sidecar metadata cache** (`obj["attrviz_scope"]`). Rejected hardest, because it is state with a lifecycle we cannot win:
+
+| Question | Answer |
+|---|---|
+| Persists across save? | Yes — ID props save with the .blend, so stale claims outlive the graph and travel on append |
+| Realize added/removed? | Scope depends on graph *topology*; our epochs report only "geometry changed", which fires every scrub tick |
+| Attribute deleted? | Stale entry pointing at nothing |
+| Creating node deleted? | Attribute may still exist, now carrying provenance that is no longer true |
+| Attribute renamed? | `name` is the only writable field — the cache key is a mutable string; a rename orphans the entry or hands its claim to a different attribute |
+
+Keyed on a mutable string, invalidated at the wrong granularity, persisted beyond the facts that produced it, and its failure mode is a *confident wrong answer*.
+
+### The principle
+
+**Do not reconstruct information the data model destroyed — read it where it still exists.**
+
+Every route above starts *after* Realize and is therefore archaeology. The two things that work do not: **Instance domain** reads scope while it is structural and true, and **P4 unpack** gets element data without destroying scope. Neither needs detection, state, or a lifecycle.
+
+### Stay Blender-native — the API moves under you
+
+The deeper reason the rejected routes are rejected: every one of them is **derived state that has to be maintained against a moving API**. Blender's surface changed six times in ways that broke working code *during this one task*:
+
+| Surprise | Cost |
+|---|---|
+| `FunctionNodeCompare` `A_STR` → `A` (5.0.x → 5.2) | Engine build died mid-tree; masked as `KeyError: 'Style'` |
+| `FunctionNodeRandomValue` outputs collapsed to one dynamic socket | Benchmark harness crashed |
+| `GeometrySet.instances_pointcloud()` is a **method**, not a property | `getattr(gs, "instances", None)` silently returns None — the naive fix no-ops |
+| Instance `position` reads **uninitialised memory** after the first call | Would have shipped markers at garbage coordinates |
+| Modifier inputs moved to `properties.inputs` (an `IDPropertyGroup`) | Three RNA driver paths failed; old ID-prop access gone |
+| Referenced `Mesh` freed with its `GeometrySet` | `StructRNA of type Mesh has been removed`, three separate times |
+
+Anything that caches, tags, or re-categorises on top of that surface inherits all of it, plus its own invalidation lifecycle. The native reads — `attributes`, `domain`, the evaluated GeometrySet — are the parts most likely to survive, because they are what Blender itself is built on.
+
+**Rule for this POR and its successors:** prefer reading what Blender already models over anything AttrViz has to derive and keep in step. When a native read is unavailable, say so in the UI rather than reconstructing it. Every fallback we add is a thing that breaks quietly on the next release.
+
+### What survives
+
+One stateless idea, which passes every lifecycle question because it has no state: a **display-time cardinality readout** — *"`height`: 33 distinct across 190,344 points"* — computed fresh in ~0.6 ms and discarded after drawing. It describes what is in front of you without claiming provenance. If someone realized their scatter and their markers look wrong, this says why. Same mechanism covers the global-constant case (`np.ptp == 0` → report the single value instead of N identical markers).
+
+---
+
+### P4 — Unpack mode (proposed, not built)
+
+**Why.** Telling the user to add a Realize node asks them to mutate a production graph for a debug view — the exact thing "zero mutation, watched objects never touched" exists to prevent. It also changes what renders, and a scatter that legitimately ships un-realized (the normal case, since instancing is why it is cheap) cannot be inspected at element level at all without changing the scene.
+
+**What it is NOT:** no nodes are added to the graph. AttrViz reconstructs the realized geometry in its **own numpy buffers** at draw time — the same mechanism Surface-on-Instance already ships. This is distinct from the parked graph-instrumentation idea, which *would* modify the tree.
+
+**Honest scope of the win.** Narrower than first argued. With Realize on you *can* already see both kinds of attribute simultaneously — they all land on Point. What Realize-on costs is granularity (56 coincident markers per building) and the graph mutation itself. Unpack wins for scatters that ship un-realized; if the working style keeps Realize on, it buys comparatively little.
+
+- [ ] Per-visualizer, **auto-on when a mesh domain is picked on an instanced object** — no mode to discover, no re-opening the menu. Panel toggle exists to turn it off and to show cost.
+- [ ] Realize parity: promote instance attributes onto unpacked elements **and** carry the prototype's own per-vertex attributes. Realize does both; users will expect it.
+- [ ] `Index` global over unpacked elements, matching Realize, not repeating per prototype.
+- [ ] Normals via inverse-transpose so non-uniform instance scale does not skew them.
+- [ ] Group by `.reference_index` (the Surface path already does this).
+- [ ] **Nested instances are detectable** — a reference that is itself instanced reports its own instance count and has **no mesh** (`ref_has_instances=[4], ref_mesh=[False]` versus `[0]/[True]` when flat). v1 may be depth-1 with an honest label; recursion with composed transforms makes it fully correct. Never silently truncate.
+- [ ] Surface unpacked element count in the panel — cost visibility (786k at detail 64 on the fixture).
+- [ ] Label unpacked domains as unpacked, so it is never ambiguous whether geometry exists in the stream or was reconstructed.
+
+---
+
+## Fixture: `mock_city.blend`
+
+Extended for this work (backup at `mock_city_backup_pre_detail.blend`; that repo has no commits):
+
+- **`Building Detail`** (int 2–64) drives the prototype cube's `Vertices X/Y/Z`
+- **`Wear Scale`** drives a noise frequency
+- **`wear`** — Noise Texture at local position, genuinely irregular per vertex
+- **`facade_z`** — local Z, a clean 0→1 gradient up each building, easy to eyeball
+
+| Detail | proto verts | unpacked total |
+|---:|---:|---:|
+| 4 | 56 | 1,848 |
+| 16 | 1,352 | 44,616 |
+| 32 | 5,768 | 190,344 |
+| 64 | 23,816 | **785,928** |
+
+One knob spans 1.8k → 786k verts on a real scene, which also serves 008's stress-scene need. **Prototype attributes are identical on every instance by construction** — city-wide per-vertex variation cannot exist before instancing, since the prototype is evaluated once and knows nothing about where its copies land. That is not a fixture limitation; it is why unpack matters.
+
+⚠️ `tools/build_seed_scatter.py` in the city repo builds the seeding half only and **deletes the object and node group** before rebuilding. Running it destroys all of this. See that repo's backlog items **SD** and **GD**.
+
+---
+
+## Parked — graph instrumentation (adjacent, POR-sized if it graduates)
+
+Recorded so the research is not repeated. **Build nothing here until the instance-domain
+work above is landed and tested.**
+
+**The insight.** Mid-graph values are not missing from Blender — they are *unaddressed*.
+Wire any field into a `Store Named Attribute` and it appears in `evaluated_attributes()`,
+lists in the RMB menu, and visualizes like anything else. **AttrViz already supports this
+today with zero changes.** The gap is that someone must declare the tap. Houdini makes
+every SOP output implicitly addressable; Blender makes you name what you want inspectable.
+Automate the tap and the two converge.
+
+**It closes the "detail" question natively.** A tapped *field* becomes a per-element
+attribute — ordinary visualization. A tapped *constant* is stamped to every element, and
+the unified-value readout collapses it back to one number. So instrumentation + `ptp == 0`
+gives detail-style inspection without ever leaving the attribute system, and without the
+product drift that reading datablock ID properties would mean.
+
+**Three separable pieces, only two of which are ours:**
+
+1. **Nothing** — manual taps work today.
+2. **Tap helper** — insert/remove `Store Named Attribute` on a chosen socket + domain,
+   marked (`attrviz_tap_*`) and reversible.
+3. **Viewer-node passthrough** — Blender's Viewer node is already an instrumentation tap.
+   If its geometry is reachable from Python, this is strictly better than (2): no graph
+   mutation, no cleanup, no ownership. **Probe this before designing (2).**
+
+**Four real constraints on (2):**
+
+- **A tap mutates the user's node graph.** Different from touching watched geometry, but
+  still user data. Must be explicit, owned, and cleanly removable or it leaves debris in
+  someone's asset.
+- **Domain choice is not inferable.** A field is domain-agnostic until it lands; `Store
+  Named Attribute` forces a pick, and POINT vs FACE differ by implicit interpolation. A
+  tap is a *measurement decision*, and a wrong domain shows something plausible and wrong.
+- **A field needs geometry present to be stored.** `Store Named Attribute` takes a
+  Geometry input, so a pure-math branch upstream of any geometry cannot be tapped where it
+  is computed. Not every point in the graph is tappable.
+- **Taps cost evaluation** — an attribute write across every element. Opt-in per socket;
+  never a "tap everything" default.
+
+### Parked — datablock "detail" (deliberately not now)
+
+ID properties on Object / Mesh / Collection / Scene all work — floats, strings, vectors,
+keyframeable, with `id_properties_ui` metadata. AttrViz *could* read them tomorrow because
+its read path is Python. Deferred on **product identity**, not capability: they are not
+attributes, and the tagline is "see any attribute, natively."
+
+Findings worth keeping:
+
+- **No GN node reads or writes ID properties** — all 330 `GeometryNode*` / `FunctionNode*`
+  types checked. `ObjectInfo` gives transform and geometry only.
+- **A non-geometry GN group output has exactly one destination**, `attribute_name`. A value
+  leaving a graph can only land as an attribute on geometry — never on a datablock.
+- **Unresolved:** the ID-prop → driver → GN-input bridge. Three RNA paths failed on 5.2
+  (`md.properties.inputs[…]` is an `IDPropertyGroup`, not animatable the way pre-5.x
+  modifier ID-props were). The UI offers "Add Driver" on GN inputs, so it is probably
+  reachable. **This decides whether datablock detail could ever be a real control rather
+  than decoration** — worth resolving before the detail question is reopened.
 
 ---
 
