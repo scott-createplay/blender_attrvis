@@ -187,6 +187,14 @@ _depth_arr = None  # cached numpy view for current frame
 _depth_frame = -1  # frame number of cached depth
 
 
+def reset_depth_cache():
+    """Drop the per-draw-pass depth cache. Call once at the top of a draw
+    handler: the buffer is view-dependent, so it must not survive a redraw."""
+    global _depth_arr, _depth_frame
+    _depth_arr = None
+    _depth_frame = None
+
+
 def read_depth_buffer():
     """Read the active framebuffer's depth into a numpy array (fast path).
 
@@ -197,19 +205,24 @@ def read_depth_buffer():
     """
     global _depth_buf, _depth_arr, _depth_frame
     import gpu
-    import bpy
 
-    try:
-        frame = bpy.context.scene.frame_current
-    except Exception:
-        frame = -1
-
-    # Return cached if same frame
-    if _depth_arr is not None and _depth_frame == frame:
+    # Cached only WITHIN one draw pass. The cache used to key on
+    # scene.frame_current -- the ANIMATION frame -- but the depth buffer is
+    # view-dependent, and orbiting does not change the frame. On a static
+    # scene that meant reading depth once, ever, and then occlusion-testing
+    # every later view against a stale image. Callers reset per draw pass;
+    # see reset_depth_cache().
+    if _depth_arr is not None and _depth_frame is not None:
         return _depth_arr
 
     try:
+        # viewport_get() is (x, y, w, h) in FRAMEBUFFER coords. The offset is
+        # not decoration: sample coords are REGION-relative, so reading from
+        # (0, 0) samples the wrong rectangle whenever the region is not at the
+        # framebuffer origin, and occlusion_filter's clamp then folds every
+        # out-of-range row onto one edge row.
         viewport = gpu.state.viewport_get()
+        vx, vy = int(viewport[0]), int(viewport[1])
         w, h = int(viewport[2]), int(viewport[3])
         if w < 1 or h < 1:
             return None
@@ -221,11 +234,11 @@ def read_depth_buffer():
         if _depth_buf is None or len(_depth_buf) != n_pixels:
             _depth_buf = gpu.types.Buffer('FLOAT', n_pixels)
 
-        fb.read_depth(0, 0, w, h, data=_depth_buf)
+        fb.read_depth(vx, vy, w, h, data=_depth_buf)
         _depth_arr = np.frombuffer(
             bytes(_depth_buf), dtype=np.float32,
         ).reshape(h, w).copy()
-        _depth_frame = frame
+        _depth_frame = True
         return _depth_arr
     except Exception:
         _depth_arr = None
@@ -242,6 +255,21 @@ def depth_buffer_size():
         return 0, 0
 
 
+def depth_matches_region(depth_arr, region) -> bool:
+    """Does this depth buffer actually cover the region we sampled against?
+
+    Occlusion must FAIL OPEN. A filter that cannot trust its buffer has to
+    show the data, not hide it — a hidden tag is indistinguishable from an
+    absent one, and the user has no way to tell which they are looking at.
+    """
+    if depth_arr is None or region is None:
+        return False
+    try:
+        return depth_arr.shape == (int(region.height), int(region.width))
+    except Exception:
+        return False
+
+
 def occlusion_filter(sx, sy, projected_z, depth_arr, bias=0.001):
     """Filter screen-space points by depth occlusion.
 
@@ -255,7 +283,10 @@ def occlusion_filter(sx, sy, projected_z, depth_arr, bias=0.001):
         boolean mask (True = visible, False = occluded).
     """
     h, w = depth_arr.shape
-    # Clamp to valid pixel coords
+    # Clamp to valid pixel coords. NOTE: clamping is a last resort, not a
+    # coordinate fix — callers must verify the buffer covers the region
+    # (see depth_matches_region). Silently folding out-of-range samples onto
+    # an edge row hides data wherever that row happens to be occluded.
     ix = np.clip(sx.astype(np.int32), 0, w - 1)
     iy = np.clip(sy.astype(np.int32), 0, h - 1)
     scene_depth = depth_arr[iy, ix]

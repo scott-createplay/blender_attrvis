@@ -589,6 +589,8 @@ def draw_callback_px():
         return
 
     cam_pos = rv3d.view_matrix.inverted().translation
+    # Depth is view-dependent: drop last redraw's buffer before reading.
+    overlay_kind.reset_depth_cache()
     gpu.state.blend_set("ALPHA")
     font_id = 0
 
@@ -608,7 +610,7 @@ def draw_callback_px():
             continue
 
         # Depth occlusion: skip tags behind scene geometry
-        if depth_arr is not None:
+        if overlay_kind.depth_matches_region(depth_arr, region):
             with _span("tags.occlusion"):
                 sx_arr = np.array([s[0] for s in screen], dtype=np.float32)
                 sy_arr = np.array([s[1] for s in screen], dtype=np.float32)
