@@ -123,9 +123,9 @@ Do **not** realize instances to sample them. The whole point is reading the chea
 ### P2 — UI honesty ✅ (partial)
 
 - [x] Menu explains why mesh domains are absent on un-realized instances: *"Point / Edge / Face / Corner: no elements — geometry is instanced, add Realize Instances to unpack, or read it on Instance."* Guarded by tests on the triggering condition, and asserted **not** to fire for ordinary meshes.
-- [ ] Surface on Instance-only → now builds real geometry, so the empty-label case no longer applies. Revisit if a prototype has no faces.
+- [x] Surface on Instance-only → **superseded**: it now builds real geometry (P1b), so the empty-label case does not arise. Revisit only if a prototype has no faces.
 - [ ] Nested instances: detectable (below) but not yet reported.
-- [ ] **Unified-value readout.** Still wanted — see "What survives" below.
+- [ ] **Unified-value readout.** Design settled and moved to [`../../docs/explorations.md`](../../docs/explorations.md) — badge on both states, exact `ptp` check pre-cull, Tags collapses per-object. One open question there (may a collapsed tag override the user's `Tag Color`).
 
 ### P3 — Closeout
 
