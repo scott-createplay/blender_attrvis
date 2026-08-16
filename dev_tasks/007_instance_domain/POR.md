@@ -2,9 +2,9 @@
 
 **Parent / history:** GPU overlay is THE path ([`../002_overlay_kinds/POR.md`](../002_overlay_kinds/POR.md)). 006 taught the sampler to read point clouds ([`../006_points_input/POR.md`](../006_points_input/POR.md)) — this POR reuses that path almost wholesale, because the instances component **is** a point cloud.
 **Pickup:** `AGENT_ONBOARDING.md` (not written yet).
-**Status:** Not started. Northstar: if the attribute is on the evaluated geometry, AttrViz lists it — instanced or not.
+**Status:** P0–P3 shipped (0.5.12). P4 unpack proposed, not built. Northstar: if the attribute is on the evaluated geometry, AttrViz lists it — instanced or not.
 
-AttrViz **0.5.10+**. Blender **5.0+** (instances API verified on **5.2.0** only — see P0 probe).
+AttrViz **0.5.12**. Blender **5.0+** (instances API verified on **5.2.0** only — version floor still undecided, see P0).
 
 ---
 
@@ -51,14 +51,14 @@ Same attribute, different granularity. One value per building is the honest read
 
 ## Locked product
 
-**Instance is a first-class domain in the RMB menu**, alongside Point / Edge / Face / Corner. Selecting `Instance → height` draws one sample per instance, at the instance origin.
+**Instance is a first-class domain in the RMB menu**, alongside Point / Edge / Face / Corner. Selecting `Instance → height` draws one sample per instance, at the instance **centroid** — not the pivot, which is an authoring artifact that usually sits inside the geometry (see P1b).
 
 | Display | Instance domain |
 |---------|-----------------|
 | **Markers** | Default. One marker per instance. ColorRamp (003) / hash (005) unchanged — they consume `(pos, values, dtype)`. |
 | **Arrows** | Vector attr on instances, at instance origins. Non-vector → empty (same honesty). |
 | **Tags** | Text at instance origins. This is the domain Tags are *best* at — one label per building. |
-| **Surface** | Requires faces. Instances have none at this level. Empty + one-line reason, same as point-only in 006. |
+| **Surface** | **Superseded — Surface paints the instanced geometry.** Originally specced as empty ("instances have no faces"), which is true at the top level and wrong for the use case. It transforms each instance's referenced prototype in numpy and paints it with that instance's value. See P1b. |
 
 Do **not** fold instance attributes into the Point domain. If an object has both a real mesh and instances, `height` on each is a *different attribute with a different element count*; collapsing them into one menu entry makes the sample ambiguous and silently picks one.
 
