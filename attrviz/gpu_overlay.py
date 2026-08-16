@@ -328,6 +328,12 @@ def _on_load_post(_dummy):
     _rebuild_muted_ptrs()
     invalidate_all()
     try:
+        # Epochs are keyed on datablock pointers — meaningless across files,
+        # and a reused pointer could mask a change.
+        gpu_sample.reset_epochs()
+    except Exception:
+        pass
+    try:
         from . import tags_draw
         tags_draw.invalidate_cache()
     except Exception:
@@ -1362,6 +1368,27 @@ def _draw_gpu_entry(entry):
         entry["batch"].draw(shader)
 
 
+def _viz_domain(md):
+    try:
+        return node_builder.menu_input_name(md, "Domain")
+    except Exception:
+        return None
+
+
+def _split_geometric_depth(rows):
+    """(depth-tested, always-on-top) — Instance ink is drawn over the top.
+
+    Split out so the rule is testable without a GPU draw context.
+    """
+    tested, on_top = [], []
+    for row in rows:
+        target = (on_top
+                  if _viz_domain(row[1]) == node_builder.INSTANCE_DOMAIN
+                  else tested)
+        target.append(row)
+    return tested, on_top
+
+
 def _draw_callback_view_impl():
     context = bpy.context
     if context.region is None or context.region_data is None:
@@ -1391,8 +1418,19 @@ def _draw_callback_view_impl():
     except Exception:
         pass
     gpu.state.depth_mask_set(False)
-    for obj, md, display in geometric:
+    depth_tested, on_top = _split_geometric_depth(geometric)
+    for obj, md, display in depth_tested:
         _draw_gpu_entry(_refresh_viz(obj, md, display))
+
+    # Instance-domain ink samples the CENTROID of each instance, which is
+    # inside the instanced geometry by construction — depth-testing it would
+    # hide every marker inside the very object it describes. Draw it over the
+    # top instead. Mesh domains keep the depth test: their ink sits on the
+    # surface and occlusion is meaningful there.
+    if on_top:
+        gpu.state.depth_test_set('NONE')
+        for obj, md, display in on_top:
+            _draw_gpu_entry(_refresh_viz(obj, md, display))
 
     gpu.state.depth_mask_set(True)
     gpu.state.depth_test_set('NONE')

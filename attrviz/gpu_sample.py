@@ -74,6 +74,125 @@ def _geom_has_points(geom) -> bool:
     return _is_pointcloud_data(geom) and _point_count(geom) > 0
 
 
+def instances_cloud(gs):
+    """The evaluated instances component, or None.
+
+    On 5.2 this is ``GeometrySet.instances_pointcloud()`` — a METHOD, not one
+    of the ``mesh`` / ``curves`` / ``pointcloud`` properties. That is why
+    ``getattr(gs, "instances", None)`` silently returns None and adding
+    "instances" to the component tuple does nothing. Tolerates either shape so
+    a future rename does not break discovery outright.
+    """
+    if gs is None:
+        return None
+    src = getattr(gs, "instances_pointcloud", None)
+    if src is None:
+        return None
+    try:
+        pc = src() if callable(src) else src
+    except Exception:
+        return None
+    if pc is None:
+        return None
+    try:
+        return pc if len(pc.points) else None
+    except Exception:
+        return None
+
+
+def _instance_transforms(pc):
+    """(N, 4, 4) instance matrices, row-major (translation in row 3).
+
+    NOT the ``position`` attribute. On 5.2 that component reads UNINITIALISED
+    MEMORY — garbage (9.1e+30) or zeros — on every call but a lucky first one
+    in a fresh process, while every other attribute on the same cloud
+    (``instance_transform``, ``.reference_index``, user attributes) reads
+    correctly and stably. Releasing references and forcing gc does not restore
+    it, so the usual "hold the GeometrySet" rule does not apply.
+    """
+    n = _point_count(pc)
+    if n == 0:
+        return np.zeros((0, 4, 4), dtype=np.float32)
+    xf = np.empty(n * 16, dtype=np.float32)
+    if not _attr_into(pc, "instance_transform", "value", xf):
+        return np.zeros((n, 4, 4), dtype=np.float32)
+    return xf.reshape(-1, 4, 4)
+
+
+def _instance_reference_index(pc) -> np.ndarray:
+    n = _point_count(pc)
+    idx = np.zeros(n, dtype=np.int32)
+    _attr_into(pc, ".reference_index", "value", idx)
+    return idx
+
+
+def _instance_prototypes(geo):
+    """Per-reference prototype geometry: [(verts Vx3, tri_verts Tx3), ...].
+
+    MUST be read while the caller still holds ``geo`` — the referenced Mesh is
+    freed with it ("StructRNA of type Mesh has been removed").
+    """
+    out = []
+    try:
+        refs = geo.instance_references()
+    except Exception:
+        return out
+    for ref in refs:
+        rm = getattr(ref, "mesh", None)
+        if rm is None or len(rm.vertices) == 0:
+            out.append(None)
+            continue
+        verts = _point_positions(rm)
+        tri_v = np.zeros((0, 3), dtype=np.int32)
+        try:
+            rm.calc_loop_triangles()
+            n_t = len(rm.loop_triangles)
+            if n_t:
+                buf = np.empty(n_t * 3, dtype=np.int32)
+                rm.loop_triangles.foreach_get("vertices", buf)
+                tri_v = buf.reshape(-1, 3)
+        except Exception:
+            pass
+        out.append((verts, tri_v))
+    return out
+
+
+def _apply_instance_xform(local, mats):
+    """Row-vector transform: (N, K, 3) local → world under (N, 4, 4) mats."""
+    return (np.einsum('nkj,njm->nkm', local, mats[:, :3, :3])
+            + mats[:, None, 3, :3])
+
+
+def _instance_positions(pc, geo) -> np.ndarray:
+    """One sample point per instance — the CENTROID of its geometry.
+
+    Not the instance pivot. The pivot is an artifact of how the prototype was
+    authored: for a building box it sits on the base, so a marker there lands
+    inside the bottom face and is occluded by the very geometry it describes.
+    The meaningful point is the middle of the instanced geometry.
+
+    Uses the prototype's bounding-box centre rather than the vertex mean,
+    which would drift toward finely subdivided regions.
+    """
+    n = _point_count(pc)
+    if n == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    mats = _instance_transforms(pc)
+    ridx = _instance_reference_index(pc)
+    protos = _instance_prototypes(geo)
+    centres = np.zeros((max(len(protos), 1), 3), dtype=np.float32)
+    for i, proto in enumerate(protos):
+        if proto is None:
+            continue
+        verts = proto[0]
+        if len(verts):
+            centres[i] = (verts.min(axis=0) + verts.max(axis=0)) * 0.5
+    np.clip(ridx, 0, len(centres) - 1, out=ridx)
+    local = centres[ridx][:, None, :]                     # (N, 1, 3)
+    return np.ascontiguousarray(
+        _apply_instance_xform(local, mats)[:, 0, :])
+
+
 def _evaluated_source(obj: bpy.types.Object):
     """Evaluated mesh and/or point-cloud components.
 
@@ -144,11 +263,92 @@ def _read_attr(me, name: str, domain: str, n: int):
     return None, dt
 
 
+# ── bulk accessors ──────────────────────────────────────────────────
+#
+# NEVER read geometry per element. Blender stores mesh data as contiguous
+# typed arrays; the `vertices` / `polygons` / `loops` collections are legacy
+# views over them, so a Python loop (or even `foreach_get` on the collection)
+# re-resolves RNA per item. Measured at 160k verts / 637k loops:
+#
+#   Point positions   0.1 ms (attribute)   vs   16.4 ms at 1M via vertices.co
+#   Face centers      9.3 ms (bulk)        vs   90.8 ms per-element
+#   Face normals      0.1 ms (cache)       vs   93.1 ms per-element
+#   Edge centers     23.0 ms (bulk+numpy)  vs  504.9 ms per-element
+#   Corner positions 21.6 ms (bulk+numpy)  vs  518.7 ms per-element
+#
+# Everything below routes through _attr_into / _bulk_into. Both share one
+# contract: fill the buffer and return True, or touch nothing and return
+# False so the caller can fall back. Add a reader here, not inline.
+
+
+def _attr_into(geom, name: str, prop: str, out, data_type=None) -> bool:
+    """Fill ``out`` from a named attribute's backing array."""
+    attrs = getattr(geom, "attributes", None)
+    if attrs is None:
+        return False
+    try:
+        attr = attrs.get(name)
+        if attr is None:
+            return False
+        if data_type is not None and attr.data_type != data_type:
+            return False
+        attr.data.foreach_get(prop, out)
+        return True
+    except Exception:
+        return False
+
+
+def _bulk_into(coll, prop: str, out) -> bool:
+    """Fill ``out`` from a collection via ``foreach_get``."""
+    if coll is None:
+        return False
+    try:
+        coll.foreach_get(prop, out)
+        return True
+    except Exception:
+        return False
+
+
+def _attr_vec3(geom, name: str, out) -> bool:
+    """FLOAT_VECTOR attribute → ``out``. Kept for the position/cloud paths."""
+    return _attr_into(geom, name, "vector", out, data_type='FLOAT_VECTOR')
+
+
 def _point_positions(me) -> np.ndarray:
-    n = len(me.vertices)
-    cos = np.empty(n * 3, dtype=np.float32)
-    me.vertices.foreach_get("co", cos)
+    cos = np.empty(len(me.vertices) * 3, dtype=np.float32)
+    if not _attr_vec3(me, "position", cos):
+        _bulk_into(me.vertices, "co", cos)
     return cos.reshape(-1, 3)
+
+
+def _point_normals(me, n: int) -> np.ndarray:
+    a = np.empty(n * 3, dtype=np.float32)
+    if not _bulk_into(getattr(me, "vertex_normals", None), "vector", a):
+        _bulk_into(me.vertices, "normal", a)
+    return a.reshape(-1, 3)
+
+
+def _face_normals(me, n: int) -> np.ndarray:
+    a = np.empty(n * 3, dtype=np.float32)
+    if not _bulk_into(getattr(me, "polygon_normals", None), "vector", a):
+        _bulk_into(me.polygons, "normal", a)
+    return a.reshape(-1, 3)
+
+
+def _corner_vert_index(me) -> np.ndarray:
+    """Vertex index per corner — the loop→vert map, bulk."""
+    idx = np.empty(len(me.loops), dtype=np.int32)
+    if not _attr_into(me, ".corner_vert", "value", idx):
+        _bulk_into(me.loops, "vertex_index", idx)
+    return idx
+
+
+def _edge_vert_index(me) -> np.ndarray:
+    """(N, 2) vertex indices per edge, bulk."""
+    ev = np.empty(len(me.edges) * 2, dtype=np.int32)
+    if not _attr_into(me, ".edge_verts", "value", ev):
+        _bulk_into(me.edges, "vertices", ev)
+    return ev.reshape(-1, 2)
 
 
 def _cloud_positions(pc) -> np.ndarray:
@@ -156,6 +356,8 @@ def _cloud_positions(pc) -> np.ndarray:
     if n == 0:
         return np.zeros((0, 3), dtype=np.float32)
     cos = np.empty(n * 3, dtype=np.float32)
+    if _attr_vec3(pc, "position", cos):
+        return cos.reshape(-1, 3)
     pts = getattr(pc, "points", None)
     if pts is not None:
         try:
@@ -163,37 +365,32 @@ def _cloud_positions(pc) -> np.ndarray:
             return cos.reshape(-1, 3)
         except Exception:
             pass
-    attr = pc.attributes.get("position") if hasattr(pc, "attributes") else None
-    if attr is not None:
-        attr.data.foreach_get("vector", cos)
-        return cos.reshape(-1, 3)
     return np.zeros((0, 3), dtype=np.float32)
 
 
 def _face_centers(me) -> np.ndarray:
     n = len(me.polygons)
-    centers = np.empty((n, 3), dtype=np.float32)
+    centers = np.empty(n * 3, dtype=np.float32)
+    if _bulk_into(me.polygons, "center", centers):
+        return centers.reshape(-1, 3)
+    out = np.empty((n, 3), dtype=np.float32)
     for i, poly in enumerate(me.polygons):
-        centers[i] = poly.center
-    return centers
+        out[i] = poly.center
+    return out
 
 
 def _edge_centers(me) -> np.ndarray:
-    n = len(me.edges)
-    centers = np.empty((n, 3), dtype=np.float32)
-    for i, e in enumerate(me.edges):
-        centers[i] = (
-            me.vertices[e.vertices[0]].co + me.vertices[e.vertices[1]].co
-        ) * 0.5
-    return centers
+    if len(me.edges) == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    pos = _point_positions(me)
+    ev = _edge_vert_index(me)
+    return ((pos[ev[:, 0]] + pos[ev[:, 1]]) * 0.5).astype(np.float32)
 
 
 def _corner_positions(me) -> np.ndarray:
-    n = len(me.loops)
-    pos = np.empty((n, 3), dtype=np.float32)
-    for i, loop in enumerate(me.loops):
-        pos[i] = me.vertices[loop.vertex_index].co
-    return pos
+    if len(me.loops) == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    return _point_positions(me)[_corner_vert_index(me)]
 
 
 def _to_world(positions: np.ndarray, matrix_world) -> np.ndarray:
@@ -242,22 +439,16 @@ def _read_intrinsic(me, name: str, domain_ui: str, cos=None):
 
     if name == node_builder.NORMAL_ATTR:
         if domain_ui == "Point":
-            a = np.empty(n * 3, dtype=np.float32)
-            me.vertices.foreach_get("normal", a)
-            return a.reshape(-1, 3), 'FLOAT_VECTOR'
+            return _point_normals(me, n), 'FLOAT_VECTOR'
         if domain_ui == "Face":
-            a = np.empty((n, 3), dtype=np.float32)
-            for i, poly in enumerate(me.polygons):
-                a[i] = poly.normal
-            return a, 'FLOAT_VECTOR'
+            return _face_normals(me, n), 'FLOAT_VECTOR'
         if domain_ui == "Corner":
-            vn = np.empty(len(me.vertices) * 3, dtype=np.float32)
-            me.vertices.foreach_get("normal", vn)
-            vn = vn.reshape(-1, 3)
-            a = np.empty((n, 3), dtype=np.float32)
-            for i, loop in enumerate(me.loops):
-                a[i] = vn[loop.vertex_index]
-            return a, 'FLOAT_VECTOR'
+            # Smooth vertex normal indexed per corner — NOT me.corner_normals,
+            # which are split normals and would change what Arrows draw on a
+            # sharp-edged mesh. Behaviour preserved deliberately; switching to
+            # split normals is a product call, not a perf one.
+            return (_point_normals(me, len(me.vertices))[_corner_vert_index(me)],
+                    'FLOAT_VECTOR')
     return None, None
 
 
@@ -296,11 +487,37 @@ def _sample_evaluated_impl(
     *,
     world_space: bool = True,
 ) -> Optional[SampleResult]:
-    domain_ui = domain_ui if domain_ui in node_builder.DOMAINS else "Point"
-    blender_dom = node_builder.DOMAIN_TO_BLENDER[domain_ui]
+    domain_ui = domain_ui if domain_ui in node_builder.UI_DOMAINS else "Point"
 
     with _span("sample.depsgraph_source"):
         ev, me, pc, _hold = _evaluated_source(obj)
+
+    if domain_ui == node_builder.INSTANCE_DOMAIN:
+        # Un-realized instances. The component is a PointCloud whose
+        # attributes self-report POINT; `position` is the instance origin in
+        # object space (verified against depsgraph.object_instances), so the
+        # normal _to_world step applies. Reading here is strictly more
+        # faithful than realizing: Realize DUPLICATES each instance value onto
+        # every vertex of its prototype, so realized Markers draw N coincident
+        # markers per instance where this draws one.
+        inst = instances_cloud(_hold)
+        if inst is None:
+            return None
+        with _span("sample.positions.Instance"):
+            positions = _instance_positions(inst, _hold)
+        with _span("sample.read_attr"):
+            if node_builder.is_intrinsic(attr):
+                values, dtype = _read_cloud_intrinsic(inst, attr, cos=positions)
+            else:
+                values, dtype = _read_attr(inst, attr, 'POINT', len(positions))
+        if values is None:
+            return None
+        if world_space:
+            with _span("sample.to_world"):
+                positions = _to_world(positions, ev.matrix_world)
+        return positions, values, dtype
+
+    blender_dom = node_builder.DOMAIN_TO_BLENDER[domain_ui]
 
     if _geom_has_verts(me):
         with _span(f"sample.positions.{domain_ui}"):
@@ -398,30 +615,79 @@ def watch_meshes_for_visualizer(md) -> List[bpy.types.Object]:
     return iter_watch_meshes(target, scope)
 
 
-def watch_fingerprint(md) -> tuple:
-    """Cheap watch-set topology + transform signature (no attr read).
+# ── change detection ────────────────────────────────────────────────
+#
+# The overlay draws from a Python-side snapshot, which lives outside the
+# dependency graph, so it has to reconstruct the dirty signal the graph
+# already computes. Counting elements off the ORIGINAL mesh (what this used
+# to do) cannot see any of it: a GN scatter can drop a building and the
+# counts never move, because they describe pre-modifier data.
+#
+# Measured on 5.2 — which signal actually reports what:
+#
+#   attribute values / vertex move / GN input   depsgraph_update_post, geometry
+#   object transform                            depsgraph_update_post, transform
+#   edit-mode vertex move (while IN edit mode)  depsgraph_update_post, geometry
+#   frame change on an animated source          NOTHING — depsgraph_update_post
+#                                               does not fire at all
+#
+# Hence two counters. Per-object epochs where the graph tells us which
+# object changed, and one scene epoch for frame changes, where it does not:
+# frame_change_post carries no per-object update list, so the honest move is
+# to invalidate everything rather than guess.
+_epochs: dict = {}
+_scene_epoch: int = 0
 
-    Used by the GPU overlay to decide cache hits *before* sampling.
+
+def _epoch_key(obj) -> int:
+    """Pointer of the ORIGINAL datablock — depsgraph updates may report the
+    evaluated copy, while watch sets always hold originals."""
+    return getattr(obj, "original", obj).as_pointer()
+
+
+def note_depsgraph_updates(depsgraph) -> None:
+    """Bump the epoch of every object the graph says changed. Hot path —
+    this runs on every depsgraph update, so it only reads flags."""
+    for update in depsgraph.updates:
+        idb = update.id
+        if not isinstance(idb, bpy.types.Object):
+            continue
+        if update.is_updated_geometry or update.is_updated_transform:
+            key = _epoch_key(idb)
+            _epochs[key] = _epochs.get(key, 0) + 1
+
+
+def note_frame_change() -> None:
+    global _scene_epoch
+    _scene_epoch += 1
+
+
+def reset_epochs() -> None:
+    """File load: pointers are meaningless across files, and a reused
+    pointer could otherwise mask a change."""
+    global _scene_epoch
+    _epochs.clear()
+    _scene_epoch += 1
+
+
+def watch_fingerprint(md) -> tuple:
+    """Watch-set identity + change epochs. No geometry read, no counts.
+
+    Identity (which objects, which datablocks) still belongs here: adding or
+    removing a target need not fire a geometry update on anything. Element
+    counts and matrix_world do not — they were a walk of every watched mesh
+    on every redraw, and the epochs supersede them.
     """
     parts = []
     for obj in watch_meshes_for_visualizer(md):
         me = getattr(obj, "data", None)
-        mw = obj.matrix_world
-        tw = tuple(mw[i][j] for i in range(4) for j in range(4))
-        if me is not None and hasattr(me, "vertices"):
-            nv = len(me.vertices)
-            ne = len(me.edges)
-            np_ = len(me.polygons)
-        else:
-            nv = _point_count(me)
-            ne = 0
-            np_ = 0
+        key = _epoch_key(obj)
         parts.append((
-            obj.as_pointer(),
+            key,
             me.as_pointer() if me is not None else 0,
-            nv, ne, np_, tw,
+            _epochs.get(key, 0),
         ))
-    return tuple(parts)
+    return (_scene_epoch, tuple(parts))
 
 
 def watch_has_faces(md) -> bool:
@@ -596,6 +862,54 @@ def _build_surface_tris_impl(
     dtype = None
     n_tris_total = 0
 
+    if domain_ui == node_builder.INSTANCE_DOMAIN:
+        # Surface on the instance domain paints each instance's REFERENCED
+        # geometry with that instance's value — the useful reading of
+        # "surface" here, and the reason not to make the user add a Realize
+        # node. Realize would give the same picture at 8x the samples and the
+        # wrong granularity; this transforms the prototype in numpy instead,
+        # mutating nothing.
+        for obj in meshes:
+            ev, _me, _pc, hold = _evaluated_source(obj)
+            inst = instances_cloud(hold)
+            if inst is None:
+                continue
+            res = sample_evaluated(obj, attr, domain_ui, world_space=False)
+            if res is None:
+                continue
+            _p, values, dt = res
+            dtype = dt
+            values = np.asarray(values)
+            mats = _instance_transforms(inst)
+            ridx = _instance_reference_index(inst)
+            protos = _instance_prototypes(hold)   # read while `hold` is alive
+            if not protos:
+                continue
+            np.clip(ridx, 0, len(protos) - 1, out=ridx)
+            for r, proto in enumerate(protos):
+                if proto is None:
+                    continue
+                verts, tri_v = proto
+                if len(tri_v) == 0:
+                    continue
+                sel = np.flatnonzero(ridx == r)
+                if sel.size == 0:
+                    continue
+                corners = verts[tri_v].reshape(-1, 3)          # (T*3, 3)
+                local = np.broadcast_to(
+                    corners, (sel.size, corners.shape[0], 3))
+                world = _apply_instance_xform(local, mats[sel])
+                world = world.reshape(-1, 3)
+                world = _to_world(world, ev.matrix_world)
+                pos_chunks.append(world.astype(np.float32))
+                col_chunks.append(
+                    np.repeat(values[sel], corners.shape[0], axis=0))
+                n_tris_total += sel.size * len(tri_v)
+        if not pos_chunks or dtype is None:
+            return None
+        return (np.concatenate(pos_chunks, axis=0),
+                np.concatenate(col_chunks, axis=0), dtype, n_tris_total)
+
     for obj in meshes:
         ev, me, _pc, _hold = _evaluated_source(obj)
         if not _geom_has_verts(me):
@@ -619,10 +933,7 @@ def _build_surface_tris_impl(
         # so Range/Style scrub can recolor without re-packing tris.
         values = np.asarray(values)
 
-        n_verts = len(me.vertices)
-        cos = np.empty(n_verts * 3, dtype=np.float32)
-        me.vertices.foreach_get("co", cos)
-        cos = cos.reshape(-1, 3)
+        cos = _point_positions(me)
 
         with _span("sample.surface_tri_pack"):
             vert_ids = np.empty(n_tris * 3, dtype=np.int32)

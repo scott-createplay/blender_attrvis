@@ -35,7 +35,30 @@ _BLENDER_TO_DOMAIN = {
     'EDGE': "Edge",
     'FACE': "Face",
     'CORNER': "Corner",
+    'INSTANCE': "Instance",
 }
+
+# UI-level domain list. node_builder.DOMAINS stays FOUR — it drives the GN
+# tree (Normal bake loop, DOMAIN_TO_BLENDER, Separate Components) and
+# appending to it breaks the tree builder. Instance is GPU-overlay-only.
+UI_DOMAINS = node_builder.UI_DOMAINS
+
+# Instance-domain internals that are not user data. `.reference_index` is
+# already dropped by the leading-dot rule. `id` is deliberately NOT hidden —
+# it is an INT, so the 005 hash path gives per-instance categorical colour.
+INSTANCE_HIDDEN = frozenset({"instance_transform"})
+
+
+def _geom_has_any(geom):
+    """True if this component has any element at all."""
+    if geom is None:
+        return False
+    try:
+        if hasattr(geom, "vertices"):
+            return len(geom.vertices) > 0
+        return geom.attributes.domain_size('POINT') > 0
+    except Exception:
+        return False
 
 
 def _ensure_collection(context):
@@ -499,13 +522,32 @@ def evaluated_attributes(obj):
                 # Prefer first-seen domain; same name on multiple domains
                 # is rare — key by (name, domain).
                 infos[(a.name, a.domain)] = a.data_type
+        # Instances: a GN tree ending in Instance on Points with no Realize
+        # has ZERO mesh elements and all its attributes on the instance
+        # domain. The component is a PointCloud whose attributes self-report
+        # POINT, so retag as INSTANCE — the UI domain is a presentation layer
+        # over it, never a rewrite of what Blender reports.
+        inst = gpu_sample.instances_cloud(gs)
+        if inst is not None:
+            for a in inst.attributes:
+                if a.name.startswith(".") or a.name in INSTANCE_HIDDEN:
+                    continue
+                infos[(a.name, 'INSTANCE')] = a.data_type
         rows = sorted((n, d, t) for (n, d), t in infos.items())
         return rows, has_faces
     except Exception:
         return [], False
 
 
-def _domain_has_elements(geom, domain_ui):
+def _domain_has_elements(geom, domain_ui, inst=None):
+    """Does this domain have anything to sample?
+
+    ``inst`` is the evaluated instances cloud, which lives beside ``geom``
+    rather than inside it — an object can legitimately offer Point (its mesh)
+    and Instance (its instances) at once.
+    """
+    if domain_ui == "Instance":
+        return inst is not None and len(inst.points) > 0
     if geom is None:
         return False
     if hasattr(geom, "vertices"):
@@ -534,7 +576,7 @@ def attributes_by_domain(obj):
     GN field sources, always current on evaluated topology.
     """
     rows, has_faces = evaluated_attributes(obj)
-    by = {d: [] for d in node_builder.DOMAINS}
+    by = {d: [] for d in node_builder.UI_DOMAINS}
     for name, bdom, dtype in rows:
         if (name in node_builder.INTRINSIC_NAMES
                 or name in node_builder.INTRINSIC_ALIASES):
@@ -542,21 +584,42 @@ def attributes_by_domain(obj):
         ui = _BLENDER_TO_DOMAIN.get(bdom)
         if ui is not None:
             by[ui].append((name, dtype))
+    # Source from the evaluated GEOMETRY SET, not ev.data. A GN object whose
+    # top-level mesh is empty (everything is instances, or the tree outputs a
+    # cloud) has a valid ev.data with zero elements, which used to suppress
+    # even Index / Position — a bug wider than instances.
+    me = None
+    inst = None
+    gs = None
     try:
         dg = bpy.context.evaluated_depsgraph_get()
         ev = obj.evaluated_get(dg)
-        me = getattr(ev, "data", None)
+        gs = ev.evaluated_geometry()          # hold — GC gotcha
+        me = getattr(gs, "mesh", None)
+        if not _geom_has_any(me):
+            me = getattr(gs, "pointcloud", None) or getattr(ev, "data", None)
+        inst = gpu_sample.instances_cloud(gs)
     except Exception:
-        me = None
-    for domain in node_builder.DOMAINS:
-        if not _domain_has_elements(me, domain):
+        if me is None:
+            try:
+                me = getattr(obj.evaluated_get(
+                    bpy.context.evaluated_depsgraph_get()), "data", None)
+            except Exception:
+                me = None
+    for domain in node_builder.UI_DOMAINS:
+        if not _domain_has_elements(me, domain, inst):
             continue
         intrinsics = []
         for name, dtype, domains in node_builder.INTRINSICS:
-            if domain not in domains:
+            if domain not in domains and domain != "Instance":
                 continue
-            if (name == node_builder.NORMAL_ATTR
-                    and not hasattr(me, "vertices")):
+            # Instances have no normal, and neither do point clouds — do not
+            # invent one (006 precedent).
+            if name == node_builder.NORMAL_ATTR:
+                if domain == "Instance" or not hasattr(me, "vertices"):
+                    continue
+            if domain == "Instance" and name not in (
+                    node_builder.INDEX_ATTR, node_builder.POSITION_ATTR):
                 continue
             intrinsics.append((name, dtype))
         by[domain] = intrinsics + by[domain]
@@ -687,7 +750,11 @@ def _enum_set(socket, items):
     return setter
 
 
-_DOMAIN_ITEMS = [(d, d, "", i) for i, d in enumerate(node_builder.DOMAINS)]
+# UI_DOMAINS, not DOMAINS: the enum must accept every domain the RMB menu
+# can offer, or assigning op.domain = "Instance" raises mid-draw and the
+# menu silently truncates at whatever was drawn before it.
+_DOMAIN_ITEMS = [(d, d, "", i)
+                 for i, d in enumerate(node_builder.UI_DOMAINS)]
 _STYLE_ITEMS = [(s, s, "", i) for i, s in enumerate(node_builder.STYLES)]
 _DISPLAY_ITEMS = [(d, d, "", i) for i, d in enumerate(node_builder.DISPLAYS)]
 
@@ -702,7 +769,7 @@ class ATTRVIZ_OT_add(bpy.types.Operator):
                                         default="position")
     domain: bpy.props.EnumProperty(
         name="Domain", default="Point",
-        items=[(d, d, "") for d in node_builder.DOMAINS])
+        items=[(d, d, "") for d in node_builder.UI_DOMAINS])
     style: bpy.props.EnumProperty(
         name="Style", default="Heat",
         items=[(s, s, "") for s in node_builder.STYLES])
@@ -890,6 +957,14 @@ class ATTRVIZ_MT_domain_face(bpy.types.Menu):
         _draw_domain_menu(self.layout, context, "Face")
 
 
+class ATTRVIZ_MT_domain_instance(bpy.types.Menu):
+    bl_idname = "ATTRVIZ_MT_domain_instance"
+    bl_label = "Instance"
+
+    def draw(self, context):
+        _draw_domain_menu(self.layout, context, "Instance")
+
+
 class ATTRVIZ_MT_domain_corner(bpy.types.Menu):
     bl_idname = "ATTRVIZ_MT_domain_corner"
     bl_label = "Corner"
@@ -919,10 +994,25 @@ class ATTRVIZ_MT_visualize(bpy.types.Menu):
             ("Edge", ATTRVIZ_MT_domain_edge.bl_idname),
             ("Face", ATTRVIZ_MT_domain_face.bl_idname),
             ("Corner", ATTRVIZ_MT_domain_corner.bl_idname),
+            ("Instance", ATTRVIZ_MT_domain_instance.bl_idname),
         )
         for domain, menu_id in menus:
             if by.get(domain):
                 layout.menu(menu_id, text=domain)
+        # Un-realized instances: the mesh domains are genuinely empty, and
+        # that is the correct Blender/Houdini semantic — element data of the
+        # instanced geometry needs Realize Instances (Houdini's unpack). Say
+        # so rather than silently offering four missing domains, and rather
+        # than faking an unpack in the overlay: the prototype's points are
+        # not this object's points.
+        if by.get(node_builder.INSTANCE_DOMAIN) and not any(
+                by.get(d) for d in node_builder.DOMAINS):
+            layout.separator()
+            col = layout.column()
+            col.enabled = False
+            col.label(text="Point / Edge / Face / Corner: no elements")
+            col.label(text="Geometry is instanced — add Realize Instances")
+            col.label(text="to unpack, or read it on Instance.")
 
 
 class ATTRVIZ_MT_edit(bpy.types.Menu):
@@ -1211,6 +1301,7 @@ CLASSES = (
     ATTRVIZ_MT_domain_edge,
     ATTRVIZ_MT_domain_face,
     ATTRVIZ_MT_domain_corner,
+    ATTRVIZ_MT_domain_instance,
     ATTRVIZ_MT_visualize,
     ATTRVIZ_MT_edit,
     ATTRVIZ_MT_root,
@@ -1278,6 +1369,30 @@ def _set_enabled(self, value):
 
 
 @persistent
+def _note_depsgraph_epochs(scene, depsgraph):
+    """Record which watched objects the depsgraph says changed.
+
+    Kept separate from _sync_vizcol_active and registered FIRST: this is the
+    overlay's only correct invalidation signal, and it must not be skipped
+    because some unrelated vizcol sync raised.
+    """
+    try:
+        gpu_sample.note_depsgraph_updates(depsgraph)
+    except Exception:
+        pass
+
+
+@persistent
+def _note_frame_change(scene, depsgraph=None):
+    """Frame changes do not fire depsgraph_update_post at all (measured on
+    5.2), so animated sources need this second signal or they go stale."""
+    try:
+        gpu_sample.note_frame_change()
+    except Exception:
+        pass
+
+
+@persistent
 def _sync_vizcol_active(scene, depsgraph):
     """Workbench Attribute shading needs active Color Attribute on eval mesh."""
     try:
@@ -1321,6 +1436,11 @@ def _sync_vizcol_active(scene, depsgraph):
 def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
+    # Epoch bump goes first — invalidation must not depend on anything after it.
+    if _note_depsgraph_epochs not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.insert(0, _note_depsgraph_epochs)
+    if _note_frame_change not in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.append(_note_frame_change)
     if _sync_vizcol_active not in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.append(_sync_vizcol_active)
     bpy.types.Object.attrviz_ui_expand = bpy.props.BoolProperty(
@@ -1341,8 +1461,8 @@ def register():
         name="Domain",
         description="Which elements the attribute is read/drawn on",
         items=_DOMAIN_ITEMS,
-        get=_enum_get("Domain", node_builder.DOMAINS),
-        set=_enum_set("Domain", node_builder.DOMAINS),
+        get=_enum_get("Domain", node_builder.UI_DOMAINS),
+        set=_enum_set("Domain", node_builder.UI_DOMAINS),
         options={'SKIP_SAVE'},
     )
     bpy.types.Object.attrviz_style = bpy.props.EnumProperty(
@@ -1378,6 +1498,10 @@ def unregister():
     tags_draw.unregister()
     if _sync_vizcol_active in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(_sync_vizcol_active)
+    if _note_depsgraph_epochs in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(_note_depsgraph_epochs)
+    if _note_frame_change in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.remove(_note_frame_change)
     bpy.types.VIEW3D_MT_object_context_menu.remove(_context_menu)
     for attr in ("attrviz_ui_expand", "attrviz_enabled", "attrviz_domain",
                  "attrviz_style", "attrviz_display", "attrviz_seed"):

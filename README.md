@@ -80,8 +80,8 @@ blender --command extension build --source-dir attrviz --output-dir build
 blender --command extension install-file --repo user_default --enable build/attrviz-<version>.zip
 ```
 
-Developed against **Blender 5.0+** (tested on 5.0.1). Current addon
-version: **0.5.8**.
+Developed against **Blender 5.0+** (tested on 5.0.1 and 5.2.0). Current
+addon version: **0.5.12**.
 
 ## Tests
 
@@ -94,6 +94,12 @@ blender --background --factory-startup --python-exit-code 1 \
 blender --background --factory-startup --python-exit-code 1 \
   --python tests/test_gpu_sample.py
 ```
+
+## Design notes
+
+[`docs/explorations.md`](docs/explorations.md) — design work that is settled enough to
+remember but not scheduled: the constant/varying readout, Tags collapse, and pointers to
+what is parked in the PORs.
 
 ## Roadmap
 
