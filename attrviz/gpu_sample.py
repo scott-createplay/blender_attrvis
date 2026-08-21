@@ -39,8 +39,30 @@ def attr_text(val) -> str:
     return str(val)
 
 
+def is_visualizer(obj) -> bool:
+    """True for an AttrViz visualizer carrier object.
+
+    Lives here rather than only in the package __init__ because is_watchable
+    needs it and gpu_sample cannot import the package. Its body touches only
+    obj.type and obj.modifiers, so there is no circular dependency.
+    """
+    return (obj is not None and getattr(obj, "type", None) == 'MESH'
+            and any(md.type == 'NODES' and md.node_group is not None
+                    and md.node_group.get("attrviz_version")
+                    for md in obj.modifiers))
+
+
 def is_watchable(obj) -> bool:
-    return obj is not None and getattr(obj, "type", None) in WATCH_TYPES
+    """True for an object a visualizer may sample.
+
+    Carriers are excluded: _watch_candidates filters them at *selection* time,
+    which a hand-managed scope collection bypasses entirely. Once Scope is
+    per-visualizer (011) a carrier can be dragged into a scope in the outliner,
+    and sampling a visualizer's own carrier is self-visualization.
+    """
+    return (obj is not None
+            and getattr(obj, "type", None) in WATCH_TYPES
+            and not is_visualizer(obj))
 
 
 def _geom_has_verts(geom) -> bool:
@@ -600,13 +622,14 @@ def scene_watch_collection():
 def watch_meshes_for_visualizer(md) -> List[bpy.types.Object]:
     """Watchable objects this viz should sample (meshes and point clouds).
 
-    If scene collection ``attrvis`` exists, it is the watch set for every
-    visualizer (empty → nothing draws). Otherwise fall back to the
-    modifier Target ∪ Scope sockets (tests, files without attrvis).
+    Resolved from the visualizer's OWN Target and Scope sockets. The scene
+    ``attrvis`` collection is the default Scope handed to new visualizers, not
+    a global override -- it used to shadow every visualizer's own Scope, which
+    made per-visualizer scoping impossible. See dev_tasks/011_viz_scope/POR.md.
+
+    A visualizer with neither socket set watches nothing. migrate_viz_scope()
+    backfills ``attrvis`` into those on load so pre-011 files keep working.
     """
-    coll = scene_watch_collection()
-    if coll is not None:
-        return iter_watch_meshes(None, coll)
     try:
         target = node_builder.get_input(md, "Target")
         scope = node_builder.get_input(md, "Scope")

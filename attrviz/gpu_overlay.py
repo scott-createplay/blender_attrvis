@@ -130,6 +130,39 @@ def _viz_cache_key(obj, md, display, extra=()):
         + _present_key(display, sock, extra=extra)
     )
 
+SCOPE_ENABLED_PROP = "attrviz_scope_enabled"
+
+
+def scope_enabled(coll) -> bool:
+    """Is the group of visualizers scoped to ``coll`` enabled? (011 D9)
+
+    Stored on the Collection and never written onto each visualizer, so
+    toggling a collection off and on preserves the individual enable states
+    the user set. Unset reads as enabled: collections predating the property,
+    and any collection in a file saved before 011, stay on.
+    """
+    if coll is None:
+        return True
+    return bool(getattr(coll, SCOPE_ENABLED_PROP, True))
+
+
+def viz_active(obj, md) -> bool:
+    """A visualizer draws iff its own toggle AND its scope's toggle are on.
+
+    Every place that iterates visualizers must use this. In particular
+    _active_watch_targets: if the mute path ignored the collection toggle,
+    disabling a collection would leave its objects muted to BOUNDS with
+    nothing drawn -- exactly the 010 bug, reintroduced.
+    """
+    if obj is None or obj.hide_viewport:
+        return False
+    from . import viz_scope
+    try:
+        return scope_enabled(viz_scope(md))
+    except Exception:
+        return True
+
+
 def _gpu_visualizers(scene):
     from . import visualizers, viz_modifier
     rows = []
@@ -138,6 +171,8 @@ def _gpu_visualizers(scene):
             continue
         md = viz_modifier(obj)
         if md is None:
+            continue
+        if not viz_active(obj, md):
             continue
         try:
             display = node_builder.menu_input_name(md, "Display")
@@ -171,12 +206,16 @@ def _suppress_gn_carriers(scene):
             continue
         if display not in _SUPPRESS_DISPLAYS:
             continue
-        enabled = not obj.hide_viewport
+        enabled = viz_active(obj, md)
         if use_gpu and enabled:
             if md.show_viewport:
                 md.show_viewport = False
         elif enabled and not md.show_viewport:
             md.show_viewport = True
+        elif not enabled and md.show_viewport:
+            # Scope-disabled: nothing set show_viewport for us, unlike the
+            # per-viz toggle which goes through _set_enabled.
+            md.show_viewport = False
     _sync_surface_target_mute(scene)
 
 
@@ -270,6 +309,36 @@ def _viz_draws_on(md, obj, cache, dg=None):
     return False
 
 
+def viz_coverage(md):
+    """(objects in scope, how many the visualizer can actually draw on).
+
+    Uses _viz_draws_on -- the same predicate that decides muting -- so the
+    number the panel shows cannot disagree with what is drawn. That invariant
+    is what 009 and 010 kept breaking in different directions: a muted object
+    with no ink, then ink with no row.
+
+    Safe to call from panel draw (a UI context). NOT safe from a depsgraph
+    handler: it asks for a depsgraph. See _eval_attr_names.
+    """
+    try:
+        objs = gpu_sample.watch_meshes_for_visualizer(md)
+    except Exception:
+        return 0, 0
+    try:
+        dg = bpy.context.evaluated_depsgraph_get()
+    except Exception:
+        dg = None
+    cache = {}
+    n_draw = 0
+    for obj in objs:
+        try:
+            if _viz_draws_on(md, obj, cache, dg):
+                n_draw += 1
+        except Exception:
+            n_draw += 1
+    return len(objs), n_draw
+
+
 def _active_watch_targets(scene, kind_name, blender_type, *,
                           collect_wire=False, dg=None):
     """Watched objects of ``blender_type`` while any enabled viz of ``kind_name``.
@@ -291,6 +360,8 @@ def _active_watch_targets(scene, kind_name, blender_type, *,
             continue
         md = viz_modifier(viz)
         if md is None:
+            continue
+        if not viz_active(viz, md):
             continue
         try:
             display = node_builder.menu_input_name(md, "Display")

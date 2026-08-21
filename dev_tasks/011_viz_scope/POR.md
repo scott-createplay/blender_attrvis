@@ -4,7 +4,7 @@
 [`../010_mute_scope/POR.md`](../010_mute_scope/POR.md), which fixed *automatic*
 drawability but left no way to say "visualize `K` on these meshes but not that
 one".
-**Status:** designed, not started.
+**Status:** **Phases 1-5b implemented and validated** (2026-08-21). One interactive spike outstanding, non-blocking -- see below.
 **Northstar:** **a visualizer watches a collection.** `attrvis` is the default
 bucket, not a global override and not a root that everything inherits from.
 
@@ -509,6 +509,57 @@ that changes what is drawn.
 Removed by discovery. Spikes S8 and S8b show `display_type` and the
 `_MUTE_PROP` stash are both writable on library data, so the mute and restore
 round trip already works on linked objects. There is nothing to warn about.
+
+## Implementation results
+
+Every phase gated before the next began, Blender 5.2.0 headless.
+
+| Phase | Gate | Result |
+|---|---|---|
+| **0** | Characterise what flips | Predicted exactly one test would invert; exactly one did |
+| **1** | Un-shadow `Scope`, backfill unset | 62 passed. Two visualizers on two collections each see only their own |
+| **2** | Carriers never watchable | 69 passed |
+| **3** | Active scope | 79 passed. Lazy `attrvis`, auto-null fallback, discovery by use |
+| **4** | Split a scope out | 88 passed. **The old visualizer stops covering the moved objects** |
+| **5** | Coverage readout | 95 passed. Panel count agrees with the mute set |
+| **5a** | Collection enable | 106 passed. **Disabling a collection RESTORES display_type** |
+| **5b** | Panel groups by collection | 115 passed. **Switching active changes nothing drawn or muted** |
+
+`test_watch_collection` went 45 -> 115. Everything else unchanged: `test_gpu_sample`
+228, `test_surface_direct` 11, plus `test_overlay_kinds`, `test_gpu_color`,
+`test_draw_guard`, the 009 baseline (4/4) and the 010 repro (4/4).
+
+A registration smoke test covers what headless cannot: register/unregister/
+re-register, all three new properties, all four operators, all three menus, and
+the panel helpers against an empty scene.
+
+### Deviations from the plan
+
+**Phase 5b uses plain rows for collection headers, not nested layout panels.**
+The nesting question (D10) is still unverified, and per-visualizer `panel_prop`
+must stay on the root layout regardless. So collection headings are full-width
+rows carrying the collapse triangle, the enable checkbox, a click-to-activate
+name and an object/visualizer count, with the visualizer panels beneath them at
+root level. This is the documented fallback, and it delivers the whole sketch --
+grouping, per-collection toggles, collapse -- with no dependency on the spike.
+If nesting is confirmed later it is a cosmetic upgrade, not a rework.
+
+**Two discovery spikes were re-pointed.** S3 and S9 asserted PRE-011 behaviour,
+so they inverted the moment Phases 1 and 2 landed -- correctly. Rather than
+leave a harness that fails by design, both now assert the post-implementation
+contract; their original readings are recorded in Phase D above.
+
+### Still outstanding
+
+- **The `panel_prop` nesting spike** (D10). Cosmetic only, given the fallback
+  above. Interactive session required.
+- **In-app verification.** The panel cannot be drawn headless (009). The tree,
+  the scope selector row and the coverage readout need a real viewport.
+- **S10's view-layer filter** was confirmed as a requirement but is not yet
+  implemented: an object in a collection not linked to the scene is still
+  sampled. Pre-existing, not introduced here, and no phase gated on it.
+
+---
 
 ## Files
 

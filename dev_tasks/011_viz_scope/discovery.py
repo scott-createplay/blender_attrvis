@@ -1,6 +1,9 @@
 """011 discovery — verify every mechanic the plan depends on, in isolation.
 
-Run BEFORE implementing anything. Each spike is independent and reports
+Written BEFORE implementing anything, to verify each mechanic in isolation.
+S3 and S9 originally characterised PRE-011 behaviour and were re-pointed at
+the post-implementation contract once Phases 1 and 2 landed; the original
+readings are recorded in POR.md. Each spike is independent and reports
 PASS / FAIL / NOTE. A FAIL means the plan needs changing, not that the code
 is broken.
 
@@ -13,13 +16,13 @@ summary table.
 Spikes:
   S1  GN Collection socket auto-nulls when its collection is deleted
   S2  Scope socket exists, is a Collection, is readable and writable
-  S3  Per-viz Scope resolves correctly once the attrvis override is bypassed
+  S3  Per-viz Scope resolves (pre-011 this proved the shadow existed)
   S4  GUI-created visualizers already carry Scope = attrvis
   S5  BoolProperty on bpy.types.Collection survives save + reload
   S6  Scene PointerProperty to Collection survives save + reload
   S7  Moving an object between collections changes coverage, orphans nothing
   S8  Linked (library) objects: is display_type writable?
-  S9  is_visualizer is reachable from gpu_sample without a circular import
+  S9  is_visualizer lives in gpu_sample so is_watchable can use it
   S10 Object in a collection not linked to the scene
 """
 import os
@@ -182,8 +185,11 @@ def _s3():
               f"{sorted(o.name for o in shadowed)}\n"
               f"phase 1 (Target u Scope): "
               f"{sorted(o.name for o in unshadowed)}")
-    ok = ({o.name for o in unshadowed} == {"S3InB"}
-          and {o.name for o in shadowed} >= {"S3InA", "S3InB"})
+    # When this spike was written, 'shadowed' returned all three objects --
+    # that WAS the bug. Phase 1 removed the override, so both paths now
+    # agree. Asserting agreement keeps the spike meaningful post-fix.
+    ok = ({o.name for o in unshadowed} == {'S3InB'}
+          and {o.name for o in shadowed} == {o.name for o in unshadowed})
     return ok, detail
 
 
@@ -195,14 +201,14 @@ def _s9():
                encoding="utf-8").read()
     i = src.index("def is_visualizer(obj):")
     body = src[i:src.index("\ndef ", i + 1)]
-    deps_on_bpy_only = "viz_modifier" not in body and "gpu_" not in body
-    # Does gpu_sample already have what it needs to decide?
-    has_local = hasattr(gpu_sample, "is_visualizer")
-    detail = (f"is_visualizer source:\n{body.strip()}\n"
-              f"gpu_sample.is_visualizer exists: {has_local}\n"
-              f"body is self-contained (no viz_modifier/gpu_*): "
-              f"{deps_on_bpy_only}")
-    return deps_on_bpy_only, detail
+    # Pre-Phase-2 this checked that the body was self-contained enough to
+    # move. Phase 2 moved it, so now assert the move actually happened.
+    has_local = hasattr(gpu_sample, 'is_visualizer')
+    delegates = 'gpu_sample.is_visualizer' in body
+    detail = ('is_visualizer body:' + chr(10) + body.strip() + chr(10)
+              + 'gpu_sample.is_visualizer exists: ' + str(has_local) + chr(10)
+              + '__init__ delegates to it:      ' + str(delegates))
+    return has_local and delegates, detail
 
 
 @spike("S7", "Moving an object between collections changes coverage")

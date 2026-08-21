@@ -370,6 +370,7 @@ def _collect_tags_impl(md, cam_pos, cap, facing_cull):
 
 def _tag_visualizers():
     from . import visualizers, viz_modifier
+    from . import gpu_overlay
     scene = bpy.context.scene
     if scene is None:
         return []
@@ -379,6 +380,8 @@ def _tag_visualizers():
             continue
         md = viz_modifier(obj)
         if md is None:
+            continue
+        if not gpu_overlay.viz_active(obj, md):
             continue
         try:
             if node_builder.menu_input_name(md, "Display") != "Tags":
