@@ -309,6 +309,58 @@ check("P4 load_post remutes cloud", pc_w.display_type == "BOUNDS",
 check("P4 load_post does not mute mesh (Markers only)",
       mesh_p4.display_type == prev_mesh_p4, mesh_p4.display_type)
 
+
+# === 010: mute only what a visualizer can actually draw on ==================
+# Muting means "the overlay replaces the original". An object the visualizer
+# cannot draw on must stay visible, or it is hidden with nothing in its place.
+# See dev_tasks/010_mute_scope/POR.md.
+print(chr(10) + "== 010: mute scope follows drawability ==")
+
+for _v in list(av.visualizers(bpy.context.scene)):
+    _v.hide_viewport = True
+gpu_overlay.suppress_gn_carriers(bpy.context.scene)
+
+m_has = make_grid("M010HasAttr")
+m_not = make_grid("M010NoAttr")
+_a = m_has.data.attributes.new("curv", 'FLOAT', 'POINT')
+for _d in _a.data:
+    _d.value = 0.25
+av._link_to_watch(bpy.context, [m_has, m_not])
+_orig_has, _orig_not = m_has.display_type, m_not.display_type
+
+viz_010 = av.add_visualizer(
+    bpy.context, scope=gpu_sample.scene_watch_collection(),
+    attribute="curv", domain="Point", style="Heat", display="Surface")
+
+check("010 object carrying the attribute is muted",
+      m_has.display_type == "BOUNDS", m_has.display_type)
+check("010 object lacking the attribute stays visible",
+      m_not.display_type == _orig_not,
+      f"muted to {m_not.display_type} with nothing drawn in its place")
+
+_targets = gpu_overlay._active_surface_watch_meshes(bpy.context.scene)
+_names = {o.name for o, _w in _targets}
+check("010 mute target set excludes the attribute-less object",
+      "M010NoAttr" not in _names and "M010HasAttr" in _names, str(_names))
+
+# Intrinsics are GN field sources and never appear in mesh.attributes, so a
+# naive obj.data.attributes probe would wrongly unmute every Normal viz.
+viz_010.attrviz_enabled = False
+viz_nrm = av.add_visualizer(
+    bpy.context, scope=gpu_sample.scene_watch_collection(),
+    attribute=node_builder.NORMAL_ATTR, domain="Point",
+    style="Heat", display="Surface")
+check("010 intrinsic Normal still mutes the attribute-less object",
+      m_not.display_type == "BOUNDS", m_not.display_type)
+check("010 intrinsic Normal mutes the other mesh too",
+      m_has.display_type == "BOUNDS", m_has.display_type)
+
+viz_nrm.attrviz_enabled = False
+check("010 disabling restores the attribute-less object",
+      m_not.display_type == _orig_not, m_not.display_type)
+check("010 disabling restores the attribute-carrying object",
+      m_has.display_type == _orig_has, m_has.display_type)
+
 print(f"\n== Result: {PASS} passed, {FAIL} failed ==")
 if FAIL:
     sys.exit(1)

@@ -982,9 +982,10 @@ def buffer_stats(result: SampleResult) -> dict[str, Any]:
         "val_shape": tuple(getattr(values, "shape", ())),
     }
     if np.issubdtype(values.dtype, np.floating):
-        flat = values.reshape(len(values), -1)
-        stats["val_min"] = float(flat.min()) if flat.size else None
-        stats["val_max"] = float(flat.max()) if flat.size else None
+        # min/max are reshape-invariant, so the (N, -1) reshape bought nothing
+        # and raised on an empty array -- the guard below was one line too late.
+        stats["val_min"] = float(values.min()) if values.size else None
+        stats["val_max"] = float(values.max()) if values.size else None
     elif np.issubdtype(values.dtype, np.integer):
         stats["val_min"] = int(values.min()) if values.size else None
         stats["val_max"] = int(values.max()) if values.size else None

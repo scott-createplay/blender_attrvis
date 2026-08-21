@@ -1396,7 +1396,10 @@ def _note_frame_change(scene, depsgraph=None):
 def _sync_vizcol_active(scene, depsgraph):
     """Workbench Attribute shading needs active Color Attribute on eval mesh."""
     try:
-        gpu_overlay.sync_surface_target_mute(scene)
+        # Pass the handler's own depsgraph: the mute probe reads evaluated
+        # attributes, and calling evaluated_depsgraph_get() from inside a
+        # depsgraph handler resyncs the view layer mid-iteration.
+        gpu_overlay.sync_surface_target_mute(scene, dg=depsgraph)
     except Exception:
         pass
     name = node_builder.VIZCOL_ATTR

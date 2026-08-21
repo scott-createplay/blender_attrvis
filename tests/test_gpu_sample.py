@@ -1413,6 +1413,36 @@ check("007 every UI domain has a registered menu class",
       str([d for d in node_builder.UI_DOMAINS
            if not hasattr(bpy.types, _menu_classes.get(d, ""))]))
 
+# --- 009: buffer_stats must survive an empty sample -------------------------
+# It is diagnostic rather than draw-path, so it is not hit every redraw -- but
+# it fails exactly when someone reaches for it to debug an empty sample, which
+# is the worst possible moment. See dev_tasks/009_empty_sample_crash/POR.md.
+
+def _bstats(values, dtype):
+    return gpu_sample.buffer_stats(
+        (np.zeros((len(values), 3), np.float32), values, dtype))
+
+_empty_ok, _empty_err = True, ""
+try:
+    for _vals, _dt in ((np.zeros((0, 3), np.float32), "FLOAT_VECTOR"),
+                       (np.zeros((0,), np.float32), "FLOAT"),
+                       (np.zeros((0,), np.int32), "INT")):
+        _st = _bstats(_vals, _dt)
+        if _st["n"] != 0 or _st["val_min"] is not None:
+            _empty_ok, _empty_err = False, f"{_dt}: {_st}"
+except Exception as _e:
+    _empty_ok, _empty_err = False, f"{type(_e).__name__}: {_e}"
+check("009 buffer_stats accepts an empty sample", _empty_ok, _empty_err)
+
+_st = _bstats(np.array([[3, 4, 0], [0, 0, 5]], np.float32), "FLOAT_VECTOR")
+check("009 buffer_stats min/max unchanged on a vector sample",
+      _st["val_min"] == 0.0 and _st["val_max"] == 5.0, str(_st))
+
+check("009 no ambiguous reshape(len(x), -1) in gpu_sample",
+      "reshape(len(" not in open(
+          os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                       "attrviz", "gpu_sample.py"), encoding="utf-8").read())
+
 print(f"\n== Result: {PASS} passed, {FAIL} failed ==")
 if FAIL:
     sys.exit(1)

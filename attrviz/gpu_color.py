@@ -169,7 +169,12 @@ def heat_scalar(values, dtype: str) -> np.ndarray:
     """Scalar Heat samples (vector → length)."""
     v = np.asarray(values, dtype=np.float32)
     if dtype in ("FLOAT_VECTOR", "FLOAT2"):
-        return np.linalg.norm(v.reshape(len(v), -1), axis=1).astype(
+        # Component count comes from the dtype, never from len(v). reshape(N, -1)
+        # is ambiguous at N=0 (numpy cannot infer the free axis with zero
+        # elements) and silently wrong on a flat (3N,) buffer, where it yields
+        # (3N, 1) and the "norm" degenerates to per-component abs().
+        ncomp = 3 if dtype == "FLOAT_VECTOR" else 2
+        return np.linalg.norm(v.reshape(-1, ncomp), axis=1).astype(
             np.float32, copy=False,
         )
     return v.reshape(-1)
