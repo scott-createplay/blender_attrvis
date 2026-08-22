@@ -553,8 +553,11 @@ check("011 P3 viz with a nulled Scope is listed under attrvis",
 
 
 
-# === 011 Phase 4: New collection from selection ============================
-print(chr(10) + "== 011 Phase 4: split a scope out ==")
+# === 011 Phase 4: New collection from selection (ADDITIVE) =================
+# Collections are additive, never exclusive (011 D4). Adding an object to a
+# second scope must NOT take it out of the first: an object legitimately
+# belongs to several scopes when they visualize different attributes.
+print(chr(10) + "== 011 Phase 4: new scope is additive ==")
 
 _watchP4 = av.active_scope(bpy.context, create=True)
 av.set_active_scope(bpy.context, _watchP4)
@@ -571,40 +574,54 @@ vizStay = av.add_visualizer(bpy.context, scope=_watchP4, attribute="heat",
                             domain="Point", style="Heat", display="Surface")
 mdStay = av.viz_modifier(vizStay)
 _before = {o.name for o in gpu_sample.watch_meshes_for_visualizer(mdStay)}
-check("011 P4 the old viz covers all three first",
+check("011 P4 the first viz covers all three",
       {"M011Stay", "M011Go1", "M011Go2"} <= _before, str(_before))
 
-_new = av.new_scope_collection(bpy.context, "011P4Split")
-av.move_to_scope(bpy.context, [mGo1, mGo2], _new)
+_new = av.new_scope_collection(bpy.context, "011P4Second")
+av._link_to_watch(bpy.context, [mGo1, mGo2], _new)
 av.set_active_scope(bpy.context, _new)
 
 check("011 P4 new collection is a SIBLING under the scene collection",
       _new.name in bpy.context.scene.collection.children
       and _new.name not in _watchP4.children,
       "child of attrvis" if _new.name in _watchP4.children else "sibling")
-check("011 P4 moved objects left the old scope",
-      _watchP4 not in mGo1.users_collection
-      and _watchP4 not in mGo2.users_collection,
+check("011 P4 ADDITIVE - objects stay in the original scope",
+      _watchP4 in mGo1.users_collection and _watchP4 in mGo2.users_collection,
       str([c.name for c in mGo1.users_collection]))
-check("011 P4 moved objects are in the new scope",
+check("011 P4 and are also in the new scope",
       _new in mGo1.users_collection and _new in mGo2.users_collection)
 check("011 P4 nothing was orphaned from the scene",
       all(len(o.users_collection) >= 1 for o in (mGo1, mGo2))
       and mGo1.name in bpy.context.scene.objects)
-check("011 P4 the unmoved object stayed put",
+check("011 P4 an unselected object is untouched",
       _watchP4 in mStay.users_collection and _new not in mStay.users_collection)
 
 _after = {o.name for o in gpu_sample.watch_meshes_for_visualizer(mdStay)}
-check("011 P4 the OLD visualizer stops covering the moved objects",
-      _after == {"M011Stay"}, str(_after))
-check("011 P4 flat topology - recursion never fires",
-      {o.name for o in gpu_sample.iter_watch_meshes(None, _watchP4)}
-      == {"M011Stay"},
-      str({o.name for o in gpu_sample.iter_watch_meshes(None, _watchP4)}))
+check("011 P4 the original visualizer STILL covers all three",
+      _after == _before, f"{_after} was {_before}")
+
+vizNew = av.add_visualizer(bpy.context, scope=_new, attribute="heat",
+                           domain="Point", style="Heat", display="Markers")
+check("011 P4 a viz on the new scope covers only the two added",
+      {o.name for o in gpu_sample.watch_meshes_for_visualizer(
+          av.viz_modifier(vizNew))} == {"M011Go1", "M011Go2"},
+      str({o.name for o in gpu_sample.watch_meshes_for_visualizer(
+          av.viz_modifier(vizNew))}))
 check("011 P4 the new scope is now active",
       av.active_scope(bpy.context) == _new)
 
+# Subtraction stays available, but only when asked for explicitly.
+av.set_active_scope(bpy.context, _watchP4)
+av._unlink_from_watch(bpy.context, [mGo1])
+check("011 P4 Remove objects is the explicit subtractive half",
+      _watchP4 not in mGo1.users_collection
+      and _new in mGo1.users_collection,
+      str([c.name for c in mGo1.users_collection]))
+av.set_active_scope(bpy.context, _new)
 
+check("011 P4 flat topology - the new scope is not nested",
+      av.collection_parent(_new) is None
+      or av.collection_parent(_new).name != _watchP4.name)
 
 # === 011 Phase 5: coverage readout matches what is drawn ===================
 # The panel number must never disagree with the viewport -- the invariant 009

@@ -293,32 +293,10 @@ def new_scope_collection(context, name=None):
     return coll
 
 
-def move_to_scope(context, objects, coll, source=None):
-    """MOVE objects into ``coll``, out of ``source`` (default: active scope).
-
-    Migrate means move, not link (011 D4). Leaving them in the old collection
-    would keep the old visualizers covering them, which is the thing the user
-    is trying to stop.
-
-    Only the source scope is unlinked -- never the user's own scene
-    organisation. Link first, unlink second, so an object is never momentarily
-    homeless.
-    """
-    ctx = context or bpy.context
-    if source is None:
-        source = active_scope(ctx)
-    moved = 0
-    for obj in objects:
-        if obj is None:
-            continue
-        if coll not in obj.users_collection:
-            coll.objects.link(obj)
-        if (source is not None and source is not coll
-                and source in obj.users_collection):
-            source.objects.unlink(obj)
-        moved += 1
-    _sync_watch_draw(ctx)
-    return moved
+# Membership is ADDITIVE, never exclusive (011 D4). Putting an object in a
+# second scope does not take it out of the first -- an object legitimately
+# belongs to several scopes when they visualize different attributes. The
+# subtractive half is the explicit "Remove objects from <scope>" action.
 
 
 def _link_to_watch(context, objects, coll=None):
@@ -989,7 +967,8 @@ class ATTRVIZ_OT_add(bpy.types.Operator):
 class ATTRVIZ_OT_watch_add(bpy.types.Operator):
     bl_idname = "attrviz.watch_add"
     bl_label = "Add objects"
-    bl_description = "Add selected objects to the attrvis watch collection"
+    bl_description = ("Link the selected objects into the active scope. They "
+                      "stay in every other collection they already belong to")
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -1236,8 +1215,10 @@ class ATTRVIZ_OT_set_active_scope(bpy.types.Operator):
 class ATTRVIZ_OT_scope_new(bpy.types.Operator):
     bl_idname = "attrviz.scope_new"
     bl_label = "New collection from selection"
-    bl_description = ("Move the selected objects into a new scope collection "
-                      "and make it active")
+    bl_description = ("Add the selected objects to a new sibling collection "
+                      "and make it active. Additive: they stay in every "
+                      "collection they already belong to. Use Remove objects "
+                      "to take them out of one")
     bl_options = {'REGISTER', 'UNDO'}
 
     name: bpy.props.StringProperty(
@@ -1259,9 +1240,9 @@ class ATTRVIZ_OT_scope_new(bpy.types.Operator):
             self.report({'WARNING'}, "No watchable objects selected")
             return {'CANCELLED'}
         coll = new_scope_collection(context, self.name)
-        n = move_to_scope(context, objs, coll)
+        _link_to_watch(context, objs, coll)
         set_active_scope(context, coll)
-        self.report({'INFO'}, f"Moved {n} to {coll.name}")
+        self.report({'INFO'}, f"Added {len(objs)} to {coll.name}")
         return {'FINISHED'}
 
 
@@ -1286,6 +1267,7 @@ class ATTRVIZ_MT_scope(bpy.types.Menu):
             op.name = coll.name
         layout.separator()
         layout.operator(ATTRVIZ_OT_scope_new.bl_idname,
+                        text="New collection from selection...",
                         icon='COLLECTION_NEW')
 
 
@@ -1295,10 +1277,17 @@ class ATTRVIZ_MT_edit(bpy.types.Menu):
 
     def draw(self, context):
         layout = self.layout
-        layout.operator(ATTRVIZ_OT_watch_add.bl_idname, icon='ADD')
-        layout.operator(ATTRVIZ_OT_watch_remove.bl_idname, icon='REMOVE')
+        active = active_scope(context)
+        name = active.name if active is not None else WATCH_COLLECTION
+        # Name the destination: with several scopes, "Add objects" alone does
+        # not say where, and link-vs-move is not guessable from the labels.
+        layout.operator(ATTRVIZ_OT_watch_add.bl_idname,
+                        text=f"Add objects to {name}", icon='ADD')
+        layout.operator(ATTRVIZ_OT_watch_remove.bl_idname,
+                        text=f"Remove objects from {name}", icon='REMOVE')
         layout.separator()
         layout.operator(ATTRVIZ_OT_scope_new.bl_idname,
+                        text="New collection from selection...",
                         icon='OUTLINER_COLLECTION')
 
 

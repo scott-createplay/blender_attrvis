@@ -136,13 +136,35 @@ visualizer, and per D9 it is **not** a view filter: every collection is always
 listed, whether active or not. Active is indicated by selection in the panel
 tree; clicking a collection row makes it active and changes nothing on screen.
 
-### D4 — Migrate means move, not link
+### D4 — Collections are ADDITIVE, never exclusive
 
-`New collection from selection` **moves** objects out of the active scope. The
-gesture exists to separate them; linking into both would leave the old
-visualizers still covering them, which is the thing the user is trying to stop.
-Linking into a second collection stays available in the outliner for anyone who
-wants it.
+**Reversed after in-app use.** The original decision was "migrate means move":
+`New collection from selection` unlinked objects from the active scope on the
+grounds that splitting out should actually split. First real use showed that is
+wrong.
+
+Putting an object in a second scope must not take it out of the first. An
+object legitimately belongs to several scopes when they visualize different
+attributes -- `K` on one, `flow` on another, same mesh -- and that is the
+common case, not the exception. Exclusivity also silently emptied the original
+collection, leaving the visualizers scoped to it drawing nothing.
+
+**Decision: adding is additive.** `New collection from selection` creates a
+sibling and *links* the selection into it. Nothing is ever removed implicitly.
+
+The subtractive half stays available and explicit: `Remove objects from
+<scope>`. Two composable primitives -- Add and Remove -- rather than a third
+that bundles both. `move_to_scope()` was deleted rather than left unused.
+
+Consequence, accepted deliberately: a visualizer scoped to the original
+collection keeps covering an object added elsewhere. If that is not wanted,
+Remove says so explicitly.
+
+**Labels must state which is which.** The reversal surfaced because "Add
+objects" and "New collection from selection" gave no clue that one linked and
+the other moved. The Edit menu now names its destination -- "Add objects to
+attrvis_other", "Remove objects from attrvis_other" -- so the active scope is
+never guessed.
 
 ### D5 — Progressive disclosure
 
@@ -520,7 +542,7 @@ Every phase gated before the next began, Blender 5.2.0 headless.
 | **1** | Un-shadow `Scope`, backfill unset | 62 passed. Two visualizers on two collections each see only their own |
 | **2** | Carriers never watchable | 69 passed |
 | **3** | Active scope | 79 passed. Lazy `attrvis`, auto-null fallback, discovery by use |
-| **4** | Split a scope out | 88 passed. **The old visualizer stops covering the moved objects** |
+| **4** | Add to a new scope | 117 passed (rewritten). **Additive: objects stay in the original scope** |
 | **5** | Coverage readout | 95 passed. Panel count agrees with the mute set |
 | **5a** | Collection enable | 106 passed. **Disabling a collection RESTORES display_type** |
 | **5b** | Panel groups by collection | 115 passed. **Switching active changes nothing drawn or muted** |
