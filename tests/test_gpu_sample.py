@@ -1443,6 +1443,52 @@ check("009 no ambiguous reshape(len(x), -1) in gpu_sample",
           os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
                        "attrviz", "gpu_sample.py"), encoding="utf-8").read())
 
+# --- 009 follow-up: authored lowercase "normal" vs the Normal intrinsic -----
+# 009 flagged a suspected collision. There is none: the GN tree compares the
+# attribute name EXACTLY against "Normal", so an authored lowercase "normal"
+# routes to a Named Attribute lookup instead. Locked in so it stays true.
+# (Only lowercase "position" is deliberately aliased onto the intrinsic.)
+
+_al_me = bpy.data.meshes.new("AliasMesh")
+_al_bm = bmesh.new()
+bmesh.ops.create_grid(_al_bm, x_segments=2, y_segments=2, size=1.0)
+_al_bm.to_mesh(_al_me)
+_al_bm.free()
+_al_obj = bpy.data.objects.new("AliasObj", _al_me)
+bpy.context.collection.objects.link(_al_obj)
+_al_lay = _al_me.attributes.new("normal", 'FLOAT_VECTOR', 'POINT')
+for _d in _al_lay.data:
+    _d.vector = (7.0, 0.0, 0.0)
+bpy.context.view_layer.update()
+
+_al_by, _ = av.attributes_by_domain(_al_obj)
+_al_pts = [n for n, _t in _al_by.get("Point", [])]
+check("009 authored 'normal' and intrinsic 'Normal' are both offered",
+      "normal" in _al_pts and "Normal" in _al_pts, str(_al_pts))
+
+_al_watch = av.active_scope(bpy.context, create=True)
+av._link_to_watch(bpy.context, [_al_obj])
+
+
+def _al_sample(attr):
+    _v = av.add_visualizer(bpy.context, scope=_al_watch, attribute=attr,
+                           domain="Point", style="Heat", display="Arrows")
+    _r = gpu_sample.sample_visualizer_targets(av.viz_modifier(_v), cap=50000)
+    return None if _r is None else np.asarray(_r[1])
+
+
+_al_low = _al_sample("normal")
+_al_cap = _al_sample("Normal")
+check("009 authored 'normal' reads the AUTHORED data",
+      _al_low is not None and abs(float(_al_low[0][0]) - 7.0) < 1e-4,
+      str(None if _al_low is None else _al_low[0]))
+check("009 intrinsic 'Normal' still reads the real normal",
+      _al_cap is not None and abs(float(_al_cap[0][2]) - 1.0) < 1e-3,
+      str(None if _al_cap is None else _al_cap[0]))
+check("009 only lowercase 'position' is aliased onto an intrinsic",
+      node_builder.INTRINSIC_ALIASES == frozenset({"position"}),
+      str(node_builder.INTRINSIC_ALIASES))
+
 print(f"\n== Result: {PASS} passed, {FAIL} failed ==")
 if FAIL:
     sys.exit(1)

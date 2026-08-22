@@ -1,8 +1,8 @@
 """011 discovery — verify every mechanic the plan depends on, in isolation.
 
 Written BEFORE implementing anything, to verify each mechanic in isolation.
-S3 and S9 originally characterised PRE-011 behaviour and were re-pointed at
-the post-implementation contract once Phases 1 and 2 landed; the original
+S3, S9 and S10 originally characterised PRE-011 behaviour and were re-pointed at
+the post-implementation contract once the fixes landed; the original
 readings are recorded in POR.md. Each spike is independent and reports
 PASS / FAIL / NOTE. A FAIL means the plan needs changing, not that the code
 is broken.
@@ -23,7 +23,7 @@ Spikes:
   S7  Moving an object between collections changes coverage, orphans nothing
   S8  Linked (library) objects: is display_type writable?
   S9  is_visualizer lives in gpu_sample so is_watchable can use it
-  S10 Object in a collection not linked to the scene
+  S10 Objects outside the scene are dropped from watch sets
 """
 import os
 import sys
@@ -237,7 +237,7 @@ def _s7():
             and in_scene), detail
 
 
-@spike("S10", "Object in a collection NOT linked to the scene")
+@spike("S10", "Objects outside the scene are dropped from watch sets")
 def _s10():
     me = bpy.data.meshes.new("S10Orphan")
     bm = bmesh.new()
@@ -259,8 +259,10 @@ def _s10():
     detail = (f"iter_watch_meshes sees it: {[x.name for x in seen]}\n"
               f"in view_layer.objects:     {in_view_layer}\n"
               f"evaluated_get usable:      {ev_ok}")
-    # We EXPECT it to be seen but not in the view layer -> needs filtering.
-    return (len(seen) == 1 and not in_view_layer), detail
+    # Pre-fix this spike proved the LEAK: iter_watch_meshes returned an
+    # object view_layer.objects did not have. The filter now drops it, so
+    # assert the fix instead. The original reading is recorded in POR.md.
+    return (len(seen) == 0 and not in_view_layer), detail
 
 
 @spike("S8", "Linked (library) objects: is display_type writable?")

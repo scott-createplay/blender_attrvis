@@ -589,16 +589,72 @@ def _sample_evaluated_impl(
     return positions, values, dtype
 
 
+def _scene_collection_ptrs(scene=None):
+    """Pointers of every collection reachable from the scene's root collection.
+
+    Used in preference to ``view_layer.objects``, which is resynced LAZILY: an
+    object linked moments earlier can still be missing from it, and filtering
+    on that would drop freshly-added objects out of a watch set. Collection
+    membership is plain data and always current.
+
+    Returns None when the scene cannot be determined, so the caller keeps
+    everything rather than silently emptying a watch set.
+    """
+    try:
+        scene = scene or bpy.context.scene
+        root = scene.collection if scene is not None else None
+    except Exception:
+        return None
+    if root is None:
+        return None
+    out = set()
+    stack = [root]
+    while stack:
+        coll = stack.pop()
+        ptr = coll.as_pointer()
+        if ptr in out:
+            continue
+        out.add(ptr)
+        try:
+            stack.extend(coll.children)
+        except Exception:
+            pass
+    return out
+
+
+def _in_scene(obj, coll_ptrs) -> bool:
+    """Is obj linked, directly or through nesting, into this scene?"""
+    if coll_ptrs is None:
+        return True
+    try:
+        return any(c.as_pointer() in coll_ptrs for c in obj.users_collection)
+    except Exception:
+        return True
+
+
 def iter_watch_meshes(target, scope) -> List[bpy.types.Object]:
-    """Resolve Target object + Scope collection → watchable objects."""
+    """Resolve Target object + Scope collection -> watchable objects.
+
+    Objects not linked into this scene are dropped. A Collection is
+    scene-independent data: it can hold objects that belong to no scene at all,
+    and those have no evaluated state here, so sampling them describes geometry
+    nobody can see. Discovery spike S10 found iter_watch_meshes returning
+    exactly such an object.
+
+    Undeterminable -> keep, so a missing context never silently empties a
+    watch set.
+    """
     seen = set()
     out: List[bpy.types.Object] = []
+    scene_colls = _scene_collection_ptrs()
 
     def add(obj):
         if not is_watchable(obj):
             return
         key = obj.as_pointer()
         if key in seen:
+            return
+        if not _in_scene(obj, scene_colls):
             return
         seen.add(key)
         out.append(obj)

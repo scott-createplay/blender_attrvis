@@ -366,30 +366,28 @@ exceptions do not surface in the UI.
 
 ---
 
-## Still open
+## Still open — all dispositioned
 
-Neither blocks this fix; both were surfaced by it.
+- **The instance budget is per-object, not global.**
+- **Centeredness is the wrong control variable for a density budget.**
+- **The frustum test uses the sample point, not the drawn extent.**
 
-- **The instance budget is per-object, not global.** `cap` is hardcoded to
-  50000 at `_refresh_viz` and never overridden, and applies to each visualizer
-  independently — a 15-object scene can upload 750k instances with nothing
-  noticing. If the cap exists to bound GPU cost, it is bounding the wrong
-  quantity. This is also why the centre-bias weighting is effectively dead code
-  in ordinary scenes (Layer 2). Fixing it is a real design change: a global
-  budget divided across visualizers by projected screen area.
-- **Centeredness is the wrong control variable for a density budget.** The
-  docstring promises "smooth density falloff," but `frame_dist` measures
-  distance from frame centre, not screen-space density. A fully visible object
-  off to one side has *all* its samples down-weighted together, so its arrow
-  density breathes as you orbit. If the goal is a draw budget, the honest
-  variable is projected screen density.
-- **The frustum test uses the sample point, not the drawn extent.** An arrow
-  whose base is just outside the frame but whose head points inward is culled,
-  so arrows pop at the frame edge. `pad=0.05` is a constant fudge for a
-  quantity that actually depends on arrow scale and distance.
-- **`INTRINSIC_ALIASES` aliases lowercase `position` only.** If a mesh carries
-  an authored lowercase `normal` attribute it will collide with the `Normal`
-  intrinsic. Separate work.
+All three moved to [`../012_cull_budget/POR.md`](../012_cull_budget/POR.md),
+which also records a fourth found while measuring: the `min(1.0, ...)` clamp on
+`keep_prob` truncates probability mass without redistributing it, so the budget
+runs slightly under. They are coupled -- fixing the budget makes the weighting
+visible for the first time -- so they belong in one deliberate change, not
+bolted onto another task.
+
+- **`INTRINSIC_ALIASES` aliases lowercase `position` only.** **CLOSED --
+  the suspected collision does not exist.** Verified on 5.2: a mesh carrying an
+  authored lowercase `normal` offers *both* entries in the menu; visualizing
+  `normal` reads the authored data `(7,0,0)` while `Normal` reads the real
+  normal `(0,0,1)`. The GN tree compares the attribute name **exactly** against
+  `"Normal"` (`node_builder._str_eq`), so lowercase never reaches the intrinsic
+  branch. Only `position` is deliberately aliased, via an explicit
+  `is_pos_c OR is_pos_l`. Locked in by `009 authored 'normal' reads the
+  AUTHORED data` and two siblings in `tests/test_gpu_sample.py`.
 
 ---
 

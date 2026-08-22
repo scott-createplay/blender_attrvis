@@ -573,13 +573,28 @@ contract; their original readings are recorded in Phase D above.
 
 ### Still outstanding
 
-- **The `panel_prop` nesting spike** (D10). Cosmetic only, given the fallback
-  above. Interactive session required.
-- **In-app verification.** The panel cannot be drawn headless (009). The tree,
-  the scope selector row and the coverage readout need a real viewport.
-- **S10's view-layer filter** was confirmed as a requirement but is not yet
-  implemented: an object in a collection not linked to the scene is still
-  sampled. Pre-existing, not introduced here, and no phase gated on it.
+- **The `panel_prop` nesting spike** (D10). Cosmetic only: Phase 5b shipped the
+  documented fallback (plain full-width collection header rows, per-visualizer
+  panels at root), which delivers grouping, toggles and collapse without it.
+  Interactive session required; not blocking anything.
+
+### Closed since
+
+- **S10's view-layer filter** — **implemented.** `iter_watch_meshes` now drops
+  objects not linked into the scene.
+
+  The first attempt filtered on `view_layer.objects` and broke three passing
+  tests, because that collection is **resynced lazily**: an object linked
+  moments earlier is still missing from it, so freshly-added objects fell out
+  of their watch set. Replaced with reachability from `scene.collection` --
+  plain data, always current, no resync. Undeterminable keeps the object, so a
+  missing context never silently empties a watch set.
+
+  **Rule for this path:** do not filter watch sets on `view_layer.objects`.
+
+- **In-app verification** — done. Surfaced the D4 reversal (collections are
+  additive, not exclusive) and confirmed the tree, scope row and coverage
+  readout render.
 
 ---
 

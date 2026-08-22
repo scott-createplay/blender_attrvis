@@ -815,6 +815,39 @@ check("011 P5b but it does retarget new actions",
       av.active_scope(bpy.context) == c5y)
 
 
+
+# === S10: objects outside the view layer are not watched ===================
+# A Collection is scene-independent data. Discovery spike S10 found
+# iter_watch_meshes returning an object that view_layer.objects did not have --
+# no evaluated state here, so sampling it describes geometry nobody can see.
+print(chr(10) + "== S10: view-layer filter ==")
+
+_floating = bpy.data.collections.new("S10FloatingScope")   # NOT linked to scene
+_ghost_me = bpy.data.meshes.new("S10Ghost")
+_ghost = bpy.data.objects.new("S10Ghost", _ghost_me)       # NOT linked to scene
+_floating.objects.link(_ghost)
+_real = make_grid("S10Real")
+_floating.objects.link(_real)
+
+check("S10 the ghost belongs to no scene collection",
+      not any(c.name in bpy.context.scene.collection.children
+              or c == bpy.context.scene.collection
+              for c in _ghost.users_collection),
+      str([c.name for c in _ghost.users_collection]))
+check("S10 the real object IS linked into the scene",
+      any(c == bpy.context.scene.collection
+          or c.name in bpy.context.scene.collection.children
+          for c in _real.users_collection),
+      str([c.name for c in _real.users_collection]))
+_seen = gpu_sample.iter_watch_meshes(None, _floating)
+check("S10 iter_watch_meshes drops the out-of-view-layer object",
+      _ghost not in _seen, str([o.name for o in _seen]))
+check("S10 and still returns the one that is in it",
+      _real in _seen, str([o.name for o in _seen]))
+check("S10 is_watchable alone still accepts it (context-free predicate)",
+      gpu_sample.is_watchable(_ghost))
+
+
 print(f"\n== Result: {PASS} passed, {FAIL} failed ==")
 if FAIL:
     sys.exit(1)
