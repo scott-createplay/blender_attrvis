@@ -573,10 +573,23 @@ contract; their original readings are recorded in Phase D above.
 
 ### Still outstanding
 
-- **The `panel_prop` nesting spike** (D10). Cosmetic only: Phase 5b shipped the
-  documented fallback (plain full-width collection header rows, per-visualizer
-  panels at root), which delivers grouping, toggles and collapse without it.
-  Interactive session required; not blocking anything.
+Nothing. 011 is complete.
+
+### Deferred by decision
+
+- **The `panel_prop` nesting spike** (D10) -- **declined, 2026-08-23.**
+  Purely cosmetic. Phase 5b shipped the documented fallback: collection
+  headers are hand-built full-width rows carrying the collapse triangle,
+  enable checkbox, click-to-activate name and counts, with the per-visualizer
+  `panel_prop` panels at root level beneath them. Grouping, toggles and
+  collapse all work; the only thing nesting would buy is Blender drawing the
+  group header and indentation itself instead of us.
+
+  It stays unverified because panel drawing needs a real UI region and
+  `--background` has none -- the one mechanic in this POR that measurement
+  could not settle. Revisit only if the implied-by-ordering hierarchy reads
+  wrong in practice; it already did once, and the fix was a restart rather
+  than a layout change.
 
 ### Closed since
 
