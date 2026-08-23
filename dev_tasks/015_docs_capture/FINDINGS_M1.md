@@ -240,3 +240,65 @@ from *byte* comparison, so it may not survive.
 occasionally the submenu simply is not open, which is a thousands-of-pixels
 diff that would fail the gate spuriously. Two samples cannot rule that out.
 Re-evaluate with more.
+
+---
+
+# Stage 2 — C5 and C2
+
+## C5 — framing — PASS
+
+Scenarios declare `view: {location, rotation_deg, distance}`, applied to
+`region_3d`. **Not `view_selected`**, which depends on selection and saved
+state — the drift this harness exists to kill. Both viewport shots are stable
+across runs at **0 px changed**.
+
+`CLEAN_OVERLAYS` also turns off floor, axes, cursor, text, stats, gizmos and
+selection outlines. Two of those flags are not overlay flags at all:
+`show_region_toolbar` / `show_region_header` live on the *space*. With region
+overlap on, the toolbar and header **float over the WINDOW region**, so
+cropping to that region is not enough to exclude them.
+
+## C2 — overlay ink — PASS, and simpler than designed
+
+The POR designed a differential ink assertion: capture with the visualizer
+disabled, then enabled, and require a non-empty diff. **Not needed.** The
+viewport, its grid and untouched geometry are all grey; overlay ink is vivid.
+So counting **saturated pixels** in the single captured frame answers it with
+no second capture:
+
+```
+sat = rgb.max(axis=2) - rgb.min(axis=2)
+ink = (sat > 0.15).sum()
+```
+
+| Shot | Ink | Floor |
+|---|---|---|
+| `viewport_hero` (Heat surface + RGB arrows) | 127,510 px | 20,000 |
+| `viewport_arrows` (arrows only) | 11,213 px | 2,000 |
+
+This is the guard against the project's worst failure mode: a too-early capture
+shows a clean grey frame and **looks correct**. `min_ink_px` turns that into an
+exit code.
+
+The settle loop from Stage 1 already handles *when* — so C2 never needed a
+measured tick count at all. Settling plus an ink floor subsumes it.
+
+## Two behaviours the shots surfaced
+
+**The hero's black box is real.** `gpu_overlay` stashes `display_type` and sets
+the watched mesh to `BOUNDS` so it does not z-fight the false-colour surface
+(`gpu_overlay.py:223`). Removing it from the hero would misrepresent the addon,
+so the framing leaves room for it instead.
+
+**Arrows alone read as a disembodied field.** With the mesh muted to BOUNDS and
+no Surface visualizer, `viewport_arrows` shows arrows tracing Suzanne's form
+with no form underneath. It is honest, and `Cube_Bare` sitting solid and
+untouched beside it is exactly the partial-coverage claim. But **Show
+Wireframe** (a modifier socket, `WIRE` instead of `BOUNDS`) would likely read
+better — untried.
+
+## Status
+
+Nine scenarios, seven gated, all stable, all at 0 px against baselines.
+Remaining from DOC_MAP: `panel_grad_expanded` (S8) and `outliner_registry`
+(S10).

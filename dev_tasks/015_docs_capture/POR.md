@@ -376,10 +376,10 @@ answer any of this.
 | Spike | Question | Pass |
 |---|---|---|
 | **C1** | Does `screenshot_area` capture the editor I targeted, or the whole window? | file contains only that editor |
-| **C2** | How many timer ticks before the GPU overlay has actually drawn? | overlay ink visible in the image; the tick count is **measured, not assumed** |
+| **C2** | How many timer ticks before the GPU overlay has actually drawn? | **PASS, and the question dissolved** — the settle loop answers *when*, and a saturated-pixel count answers *whether*. No tick count needed. |
 | **C3** | Does `--factory-startup` + `av.register()` give a reachable Viz tab? | **PASS** — `av._reveal_viz_panel()` opens the sidebar, category reads `Viz`, panel captured and cropped |
 | **C4** | Is window geometry settable and stable? | two runs produce identical pixel dimensions |
-| **C5** | Does an explicit `view_matrix` reproduce framing exactly? | two runs frame identically |
+| **C5** | Does an explicit `view_matrix` reproduce framing exactly? | **PASS** — `location`/`rotation_deg`/`distance` on `region_3d`; two viewport shots at 0 px across runs |
 | **C6** | Does Blender exit cleanly with a status we can gate on? | **PASS** — `os._exit` from the timer; `wm.quit_blender()` always exits 0 and a timer cannot set the status |
 | **C7a** | **Are two runs of the same *editor* scenario byte-identical?** | **PASS** — panel shot md5-identical; viewport-only shot 0 changed px |
 
@@ -499,7 +499,7 @@ Two instability sources fixed: the **1px active-area outline** (trimmed by
 the frame stops changing). `--selfcheck` runs a scenario twice, because
 `--check` alone cannot distinguish stable from lucky.
 
-### Stage 2 — the unmeasured primitives
+### Stage 2 — the unmeasured primitives — **DONE**
 
 | | Question | Gate |
 |---|---|---|
@@ -520,10 +520,12 @@ visualizer, empty a scope, point a viz at a missing attribute.
 layer that has never failed is not known to work — and given that the headline
 failure mode here is a *plausible wrong image*, this stage is not optional.
 
-### Stage 4 — hero fixture: Suzanne, surface + arrows
+### Stage 4 — hero fixture: Suzanne, surface + arrows — **DONE**
 
-**Gate:** arrow ink present *and legible* — a minimum changed-pixel count, not
-merely non-zero. Fix the `Torus_Measured` misnomer while in there.
+`examples/build_attr_docs_scene.py` -> `attrviz_docs.blend`. Suzanne is in two
+scopes, so Heat/Surface and RGB/Arrows draw on one object. **Gate passed:**
+127,510 ink px on the hero, 11,213 on arrows-only, floors 20,000 / 2,000. The
+`Torus_Measured`-was-a-cone misnomer is gone; `Torus_Flow` is a real torus.
 
 ### Stage 5 — annotation, region tier
 

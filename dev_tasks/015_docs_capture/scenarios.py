@@ -32,6 +32,37 @@ MENU_TICKS = {"warmup": 14, "open": 15, "nudges": (17, 19, 21, 23), "shot": 31}
 # probe_menu's plan — earlier shutter, no nudges, and NO preference changes.
 CASCADE_TICKS = {"warmup": 12, "open": 13, "nudges": (), "shot": 27}
 PANEL_TICKS = {"warmup": 16, "reveal": 17, "shot": 27}
+# No menu to open; the settle loop decides when the overlay has finished.
+VIEW_TICKS = {"warmup": 10, "shot": 12}
+
+# Studio furniture off. A hero image should be the geometry and the ink,
+# nothing else.
+CLEAN_OVERLAYS = {"show_floor": False, "show_axis_x": False,
+                  "show_axis_y": False, "show_cursor": False,
+                  "show_text": False, "show_stats": False,
+                  "show_gizmo": False, "show_outline_selected": False,
+                  # Visualizer carriers are empties drawn as bounds; without
+                  # this a black wireframe box sits around the hero.
+                  "show_extras": False,
+                  # Region overlap floats the toolbar and header OVER the
+                  # WINDOW region, so cropping to it is not enough.
+                  "show_region_toolbar": False,
+                  "show_region_header": False,
+                  "show_region_tool_header": False}
+
+# Suzanne sits at the origin; frame her from Blender's habitual three-quarter
+# angle so the form reads and the normals fan across the view.
+# The black box around the hero is Suzanne's OWN mesh muted to BOUNDS by
+# gpu_overlay (it stashes display_type so the real mesh does not z-fight the
+# false-colour surface). It is real behaviour, so the shot keeps it; framing
+# just has to leave room for it.
+HERO_VIEW = {"location": (0.0, 0.0, 0.15), "rotation_deg": (72.0, 0.0, 32.0),
+             "distance": 4.4}
+
+# One fixture, clean shots: a scenario hides the collections it does not need
+# (the POR's middle ground on the crowded-scene question).
+HERO_HIDE = ("Torus_Flow", "Grid_Plates", "Cube_Bare", "Instanced_Cloud")
+ARROWS_HIDE = ("Grid_Plates", "Instanced_Cloud")
 
 MENU_PREFS = {"open_toplevel_delay": 0, "open_sublevel_delay": 0,
               "show_tooltips": False}
@@ -57,6 +88,59 @@ def select_hero(ctx):
     """Suzanne_Measured carries grad + curv on Point and is not a visualizer,
     so ATTRVIZ_MT_visualize.poll passes and the menu lists real attributes."""
     return _make_active("Suzanne_Measured")
+
+
+def _viz(name):
+    return bpy.data.objects[name]
+
+
+def _hide(names):
+    for obj in bpy.data.objects:
+        if not obj.name.startswith("VIZ_"):
+            obj.hide_viewport = obj.name in names
+    return {"hidden": list(names)}
+
+
+def stage_hero(ctx):
+    """Both visualizers on: curv as a Heat surface, grad as RGB arrows, on the
+    same object. Nothing selected, so no orange outline in the shot."""
+    for other in bpy.context.view_layer.objects:
+        other.select_set(False)
+    bpy.context.view_layer.objects.active = None
+    _viz("VIZ_curv_surface").attrviz_enabled = True
+    _viz("VIZ_grad_arrows").attrviz_enabled = True
+    _viz("VIZ_plate_random").attrviz_enabled = False
+    out = {"enabled": ["VIZ_curv_surface", "VIZ_grad_arrows"]}
+    out.update(_hide(HERO_HIDE))
+    return out
+
+
+def stage_arrows_only(ctx):
+    """Arrows alone. The surface is their own background, so proving arrow ink
+    exists means removing the surface — otherwise a Heat-only frame would
+    satisfy any ink count."""
+    for other in bpy.context.view_layer.objects:
+        other.select_set(False)
+    bpy.context.view_layer.objects.active = None
+    _viz("VIZ_curv_surface").attrviz_enabled = False
+    _viz("VIZ_grad_arrows").attrviz_enabled = True
+    _viz("VIZ_plate_random").attrviz_enabled = False
+    # Cube_Bare stays visible on purpose: it carries no grad, and the point of
+    # this shot is that a non-carrier is left untouched rather than hidden.
+    out = {"enabled": ["VIZ_grad_arrows"]}
+    out.update(_hide(ARROWS_HIDE))
+    return out
+
+
+def assert_enabled_only(names):
+    def check(ctx):
+        on = [o.name for o in bpy.data.objects
+              if getattr(o, "attrviz_enabled", False)
+              and o.name.startswith("VIZ_")]
+        if sorted(on) != sorted(names):
+            raise AssertionError(f"enabled visualizers {on}, expected {names}")
+        return {"enabled_asserted": on}
+    return check
 
 
 def select_instanced(ctx):
@@ -182,6 +266,36 @@ SCENARIOS = [
                  "cursor": "third", "ticks": MENU_TICKS},
         "gated": True,
         "doc": "README 'Visualization axes' — instanced geometry",
+    },
+    {
+        # The hero. Surface + Arrows on ONE object, which is only possible
+        # because Suzanne is in two scopes.
+        "name": "viewport_hero",
+        "blend": SCOPE_BLEND,
+        "window": WIN_STD,
+        "prefs": PANEL_PREFS,
+        "setup": stage_hero,
+        "assertions": assert_enabled_only(
+            ["VIZ_curv_surface", "VIZ_grad_arrows"]),
+        "shot": {"kind": "viewport", "crop": "WINDOW", "view": HERO_VIEW,
+                 "overlays": CLEAN_OVERLAYS, "ticks": VIEW_TICKS,
+                 "min_ink_px": 20000},
+        "gated": True,
+        "doc": "README hero image",
+    },
+    {
+        # S9 — arrows on the carriers, and the non-carrier untouched.
+        "name": "viewport_arrows",
+        "blend": SCOPE_BLEND,
+        "window": WIN_STD,
+        "prefs": PANEL_PREFS,
+        "setup": stage_arrows_only,
+        "assertions": assert_enabled_only(["VIZ_grad_arrows"]),
+        "shot": {"kind": "viewport", "crop": "WINDOW", "view": HERO_VIEW,
+                 "overlays": CLEAN_OVERLAYS, "ticks": VIEW_TICKS,
+                 "min_ink_px": 2000},
+        "gated": True,
+        "doc": "README 'Visualization axes' — Arrows",
     },
     {
         # The cascade. Racy by construction (C7b): the sublevel delay cannot go

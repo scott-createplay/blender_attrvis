@@ -110,6 +110,51 @@ def inset_image(path, px):
     return [sub.shape[1], sub.shape[0]]
 
 
+def ink_pixels(path, min_sat=0.15):
+    """Count saturated pixels — the overlay's own ink.
+
+    C2 in a form that needs no second capture: Blender's viewport, its grid
+    and untouched geometry are all grey (saturation ~0), while a Heat ramp or
+    an RGB normal field is vivid. A too-early capture shows a clean grey frame
+    and *looks correct*, so counting ink is what separates "drew" from
+    "drew nothing".
+    """
+    frame, _size = load_rgba(path)
+    rgb = frame[:, :, :3]
+    sat = rgb.max(axis=2) - rgb.min(axis=2)
+    return int((sat > min_sat).sum())
+
+
+def apply_view(ctx, view):
+    """C5: frame by explicit numbers, never by view_selected.
+
+    view_selected depends on selection and saved state — exactly the drift
+    this harness exists to kill. location / rotation / distance fully
+    determine the view and are readable in the registry.
+    """
+    import math
+    from mathutils import Euler, Vector
+    space = next(s for s in ctx["area"].spaces if s.type == 'VIEW_3D')
+    r3d = space.region_3d
+    r3d.view_perspective = 'PERSP'
+    r3d.view_location = Vector(view["location"])
+    r3d.view_rotation = Euler(
+        [math.radians(a) for a in view["rotation_deg"]], 'XYZ').to_quaternion()
+    r3d.view_distance = float(view["distance"])
+    return {"view_location": list(view["location"]),
+            "view_rotation_deg": list(view["rotation_deg"]),
+            "view_distance": float(view["distance"])}
+
+
+def apply_overlays(ctx, flags):
+    """Turn off the studio furniture — grid, cursor, gizmos, text."""
+    space = next(s for s in ctx["area"].spaces if s.type == 'VIEW_3D')
+    for key, val in flags.items():
+        target = space.overlay if hasattr(space.overlay, key) else space
+        setattr(target, key, val)
+    return dict(flags)
+
+
 def crop_to_region(src, dst, region, area):
     """Crop by the region rect. Origin is bottom-left, Blender's pixel order."""
     frame, (iw, ih) = load_rgba(src)
@@ -217,6 +262,15 @@ class Capture:
             w, h = crop_to_region(raw, raw, region, self.ctx["area"])
             report["crop"] = [w, h]
         report["inset"] = inset_image(raw, INSET)
+        min_ink = self.shot.get("min_ink_px")
+        if min_ink:
+            ink = ink_pixels(raw)
+            report["ink_px"] = ink
+            if ink < min_ink:
+                raise AssertionError(
+                    f"only {ink} saturated px, need {min_ink} — the overlay "
+                    "did not draw, and a grey frame looks correct")
+            print(f"[capture] ink={ink} px (min {min_ink})")
         report["image"] = raw
         print(f"[capture] wrote {raw}")
 
@@ -225,7 +279,14 @@ class Capture:
         self.tick += 1
         try:
             plan = self.ticks
-            if "reveal" in plan and t == plan["reveal"]:
+            if t == 0 and self.shot.get("view"):
+                report["assertions"].update(
+                    apply_view(self.ctx, self.shot["view"]))
+                if self.shot.get("overlays"):
+                    report["assertions"].update(
+                        apply_overlays(self.ctx, self.shot["overlays"]))
+                self.ctx["area"].tag_redraw()
+            elif "reveal" in plan and t == plan["reveal"]:
                 report["assertions"].update(
                     self.scen["setup"](self.ctx) or {})
             elif "open" in plan and t == plan["open"]:
