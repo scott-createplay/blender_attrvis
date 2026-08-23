@@ -33,6 +33,9 @@ sys.path.insert(0, REPO)
 sys.path.insert(0, HERE)
 
 import attrviz as av  # noqa: E402
+from attrviz import node_builder  # noqa: E402
+
+import bitfont  # noqa: E402
 import scenarios  # noqa: E402
 
 NAME = os.environ["ATTRVIZ_SCENARIO"]
@@ -125,6 +128,50 @@ def ink_pixels(path, min_sat=0.15):
     return int((sat > min_sat).sum())
 
 
+def content_pixels(rgb, thresh=0.06):
+    """Pixels that differ from the cell's own background.
+
+    Saturation alone is the wrong oracle for a tableau: Tags draws BLF text
+    that may be near-white, i.e. unsaturated. Comparing against the median
+    colour catches both vivid ink and pale text.
+    """
+    median = np.median(rgb.reshape(-1, 3), axis=0)
+    return int((np.abs(rgb - median).max(axis=2) > thresh).sum())
+
+
+def compose_tableau(cell_paths, labels, gutter=6, label_scale=3):
+    """Grid the cells. Columns are derived, never hardcoded — adding a Display
+    type must change this image without anyone editing a layout constant."""
+    import math
+    frames = [load_rgba(p)[0] for p in cell_paths]
+    height, width = frames[0].shape[0], frames[0].shape[1]
+    count = len(frames)
+    cols = int(math.ceil(math.sqrt(count)))
+    rows = int(math.ceil(count / float(cols)))
+
+    canvas_h = rows * height + (rows + 1) * gutter
+    canvas_w = cols * width + (cols + 1) * gutter
+    canvas = np.zeros((canvas_h, canvas_w, 4), dtype=np.float32)
+    canvas[:, :, :3] = 0.10
+    canvas[:, :, 3] = 1.0
+
+    placed = []
+    for i, frame in enumerate(frames):
+        r, c = divmod(i, cols)
+        x0 = gutter + c * (width + gutter)
+        # Rows count from the top for a reader; arrays are bottom-up.
+        y0 = gutter + (rows - 1 - r) * (height + gutter)
+        canvas[y0:y0 + height, x0:x0 + width, :] = frame
+        placed.append((labels[i], r, c))
+
+    for i, (label, r, c) in enumerate(placed):
+        x0 = gutter + c * (width + gutter)
+        y_top = gutter + r * (height + gutter)
+        bitfont.draw_text(canvas, label.upper(), x0 + 14, y_top + 14,
+                          scale=label_scale)
+    return canvas, (rows, cols)
+
+
 def apply_view(ctx, view):
     """C5: frame by explicit numbers, never by view_selected.
 
@@ -183,6 +230,13 @@ class Capture:
         self.last_hash = None
         self.stable = 0
         self.settle_polls = 0
+        self.settle_from = self.ticks["shot"]
+        if self.shot["kind"] == "tableau":
+            self.displays = list(node_builder.DISPLAYS)
+            self.cell_idx = 0
+            self.cell_paths = []
+            self.pending_set = True
+            self.pre_hash = None
         area = ctx["area"]
         if self.shot.get("cursor") == "center":
             self.cx = area.x + area.width // 2
@@ -205,6 +259,86 @@ class Capture:
     def nudge(self, index):
         jitter = 1 if index % 2 else 0
         self.ctx["window"].cursor_warp(self.cx + 12 + jitter, self.cy)
+
+    def tableau_step(self, t):
+        """One cell per Display type, then composite.
+
+        The cell list comes from node_builder.DISPLAYS, so a new visualizer
+        type joins the tableau on its own — and fails the shot if it draws
+        nothing.
+        """
+        if self.pending_set:
+            name = self.displays[self.cell_idx]
+            # Hash the frame BEFORE the switch. Settling alone is not enough
+            # here: immediately after setting the property nothing has
+            # redrawn yet, so two identical polls read as "settled" and the
+            # cell captures the PREVIOUS display. That is exactly what
+            # happened — cell 0 came back byte-identical to cell 2.
+            pre = os.path.join(OUT_DIR, f"_pre_{self.scen['name']}.png")
+            with self._override():
+                bpy.ops.screen.screenshot_area(filepath=pre)
+            with open(pre, "rb") as fh:
+                self.pre_hash = hashlib.md5(fh.read()).hexdigest()
+            viz = bpy.data.objects[self.shot["viz"]]
+            viz.attrviz_display = name
+            self.ctx["area"].tag_redraw()
+            self.pending_set = False
+            self.last_hash, self.stable, self.settle_polls = None, 0, 0
+            self.settle_from = t + 1
+            print(f"[capture] cell {self.cell_idx}: {name}")
+            return
+        if (t - self.settle_from) % SETTLE_EVERY:
+            return
+        probe = os.path.join(OUT_DIR,
+                             f"_cell_{self.scen['name']}_{self.cell_idx}.png")
+        with self._override():
+            bpy.ops.screen.screenshot_area(filepath=probe)
+        with open(probe, "rb") as fh:
+            digest = hashlib.md5(fh.read()).hexdigest()
+        self.stable = self.stable + 1 if digest == self.last_hash else 0
+        self.last_hash = digest
+        self.settle_polls += 1
+
+        if digest == self.pre_hash:
+            # The switch has not landed yet. Keep waiting rather than
+            # photographing the display we just left.
+            self.stable = 0
+        elif self.stable >= SETTLE_NEEDED:
+            inset_image(probe, INSET)
+            self.cell_paths.append(probe)
+            self.cell_idx += 1
+            self.pending_set = True
+            if self.cell_idx >= len(self.displays):
+                self.finish_tableau()
+            return
+        if self.settle_polls > SETTLE_MAX_POLLS:
+            raise RuntimeError(
+                f"cell {self.displays[self.cell_idx]!r} never settled, or "
+                "renders identically to the display before it")
+
+    def finish_tableau(self):
+        canvas, grid = compose_tableau(self.cell_paths, self.displays)
+        raw = os.path.join(OUT_DIR, self.scen["name"] + ".png")
+        save_rgba(canvas, raw)
+        report["grid"] = list(grid)
+        report["cells"] = list(self.displays)
+
+        min_ink = self.shot.get("min_cell_px", 0)
+        per_cell = {}
+        for name, path in zip(self.displays, self.cell_paths):
+            rgb = load_rgba(path)[0][:, :, :3]
+            per_cell[name] = content_pixels(rgb)
+        report["cell_content_px"] = per_cell
+        empty = [k for k, v in per_cell.items() if v < min_ink]
+        if empty:
+            raise AssertionError(
+                f"these Display types drew nothing: {empty} "
+                f"(counts {per_cell}, floor {min_ink})")
+        report["assertions"].update(
+            self.scen["assertions"](self.ctx) or {})
+        report["image"] = raw
+        report["ok"] = True
+        print(f"[capture] tableau {grid[0]}x{grid[1]} {per_cell}")
 
     def settle(self, t):
         """Wait until the frame stops changing, then shoot.
@@ -293,6 +427,11 @@ class Capture:
                 self.open_menu()
             elif t in plan.get("nudges", ()):
                 self.nudge(plan["nudges"].index(t))
+            elif t >= plan["shot"] and self.shot["kind"] == "tableau":
+                self.tableau_step(t)
+                if report["ok"]:
+                    _finish()
+                    return None
             elif t >= plan["shot"]:
                 self.settle(t)
                 if report["ok"]:

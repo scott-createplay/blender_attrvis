@@ -302,3 +302,66 @@ better — untried.
 Nine scenarios, seven gated, all stable, all at 0 px against baselines.
 Remaining from DOC_MAP: `panel_grad_expanded` (S8) and `outliner_registry`
 (S10).
+
+---
+
+# The tableau, the spreadsheet, and two things they taught
+
+## `spreadsheet_attributes` — documenting a panel that is not ours
+
+Blender's Spreadsheet, switched in with `area.type = 'SPREADSHEET'`, on the
+Evaluated state so GN-authored attributes appear at all.
+
+The caption's claim is **asserted, not trusted to the picture**: the evaluated
+mesh stores `['.corner_edge', '.corner_vert', '.edge_verts', 'curv', 'grad',
+'position', 'sharp_face']`, while AttrViz offers `['Index', 'Position',
+'Normal', 'curv', 'grad']` on Point. So the assertion is exactly:
+
+- `curv` and `grad` **are** stored -> the spreadsheet shows them
+- `Normal` is **not** stored -> the spreadsheet cannot show it, and AttrViz
+  offers it anyway, computed
+
+The shot reads `Columns: 3` — position, grad, curv. No Normal.
+
+## `tableau_displays` — one attribute, every Type, one image
+
+Cells come from `node_builder.DISPLAYS`, and the grid is
+`cols = ceil(sqrt(n))` — **nothing about the layout is hardcoded**, so a new
+visualizer type joins the tableau on its own and fails the shot if it draws
+nothing (`min_cell_px`).
+
+**The attribute must be a vector.** `Arrows` needs a direction, so a float
+would leave that cell empty and the tableau would claim something it cannot
+show. `assert_tableau` checks `grad` is `FLOAT_VECTOR` rather than discovering
+it as a blank cell.
+
+Labels are baked with `bitfont.py`, a 5x7 font that is *data in the repo*. The
+POR argues against baking text into images; a tableau is the exception, since
+a grid that does not say which cell is which has failed at its only job. Being
+repo data rather than a system font keeps it deterministic.
+
+### Settling can lock onto the frame you just left
+
+The first cell came back **byte-identical to the third**. Setting
+`attrviz_display` does not redraw synchronously, so the settle loop found two
+identical polls of the *previous* display and called it settled — capturing
+Arrows and labelling it Markers.
+
+Fix: hash the frame **before** the switch and refuse to settle until it
+differs. Any capture that follows a state change needs this; "the frame stopped
+moving" does not imply "the change landed".
+
+### Hiding an object does not remove its overlay ink
+
+`hide_viewport` removed `Torus_Flow`'s mesh from the tableau while its markers,
+arrows and tags kept drawing — a floating field of ink beside every cell. To
+keep an object out of a shot it must leave the **scope**, not just the
+viewport. `_drop_from_scopes` unlinks it.
+
+This is worth knowing outside the harness: hiding a watched object does not
+stop AttrViz drawing on it.
+
+### Tags needs a cap to be legible
+
+Default `Tag Cap` is 10000. On 507 points that is a white mass. The scenario
+sets 24.

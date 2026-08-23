@@ -143,6 +143,127 @@ def assert_enabled_only(names):
     return check
 
 
+TABLEAU_HIDE = ("Torus_Flow", "Grid_Plates", "Cube_Bare", "Instanced_Cloud")
+TABLEAU_VIEW = {"location": (0.0, 0.0, 0.15), "rotation_deg": (74.0, 0.0, 26.0),
+                "distance": 4.6}
+
+
+def _drop_from_scopes(names):
+    """Hiding an object is NOT enough.
+
+    `hide_viewport` removes the mesh but the overlay keeps drawing its ink —
+    measured: Torus_Flow vanished from the tableau while its markers, arrows
+    and tags stayed. To keep an object out of a shot it has to leave the
+    scope, not just the viewport.
+    """
+    import attrviz as av
+    dropped = []
+    for coll in av.scope_collections(bpy.context.scene):
+        for name in names:
+            obj = bpy.data.objects.get(name)
+            if obj is not None and obj.name in coll.objects:
+                coll.objects.unlink(obj)
+                dropped.append(f"{name}<-{coll.name}")
+    return {"dropped_from_scope": dropped}
+
+
+def stage_tableau(ctx):
+    """One attribute, every Display type.
+
+    `grad` is a vector, and that is not incidental: **Arrows needs a
+    direction**, so a vector attribute is the only kind that every Display can
+    render. A float would give an empty Arrows cell and the tableau would be
+    making a claim it cannot support.
+    """
+    for other in bpy.context.view_layer.objects:
+        other.select_set(False)
+    bpy.context.view_layer.objects.active = None
+    _viz("VIZ_grad_arrows").attrviz_enabled = True
+    _viz("VIZ_curv_surface").attrviz_enabled = False
+    _viz("VIZ_plate_random").attrviz_enabled = False
+    out = {"attribute": "grad", "viz": "VIZ_grad_arrows"}
+    out.update(_drop_from_scopes(TABLEAU_HIDE))
+    out.update(_hide(TABLEAU_HIDE))
+    # Tags defaults to a cap of 10000. On 507 points that is a white mass, not
+    # a readable label — legible Tags need a cap the eye can follow.
+    from attrviz import node_builder
+    md = next(m for m in _viz("VIZ_grad_arrows").modifiers if m.type == 'NODES')
+    node_builder.set_input(md, "Tag Cap", 24)
+    out["tag_cap"] = 24
+    return out
+
+
+def assert_tableau(ctx):
+    """The attribute must be a vector, or Arrows cannot draw — assert that
+    rather than discovering it as an empty cell."""
+    import attrviz as av
+    from attrviz import node_builder
+    viz = _viz("VIZ_grad_arrows")
+    obj = bpy.data.objects["Suzanne_Measured"]
+    by, _ = av.attributes_by_domain(obj)
+    kinds = dict(by.get("Point", []))
+    dtype = kinds.get("grad")
+    if dtype != "FLOAT_VECTOR":
+        raise AssertionError(
+            f"grad is {dtype!r}, not FLOAT_VECTOR; Arrows needs a direction")
+    return {"attribute": "grad", "dtype": dtype,
+            "displays": list(node_builder.DISPLAYS),
+            "final_display": viz.attrviz_display}
+
+
+def stage_spreadsheet(ctx):
+    """Blender's own Spreadsheet, for contrast.
+
+    Not our panel. It is here because it shows what AttrViz adds: the
+    spreadsheet lists stored attributes, so a GN-authored `curv` appears — but
+    `Normal` never does, because it is computed, not stored. AttrViz offers it
+    anyway, as an intrinsic.
+    """
+    _make_active("Suzanne_Measured")
+    area = ctx["area"]
+    area.type = 'SPREADSHEET'
+    space = area.spaces.active
+    space.geometry_component_type = 'MESH'
+    space.attribute_domain = 'POINT'
+    # EVALUATED or curv and grad are simply absent: they are written by the
+    # modifier, and the original mesh has neither.
+    space.object_eval_state = 'EVALUATED'
+    # The area type changed, so the cached region map is stale.
+    ctx["regions"] = {r.type: r for r in area.regions}
+    area.tag_redraw()
+    return {"editor": area.type, "domain": space.attribute_domain,
+            "eval_state": space.object_eval_state}
+
+
+def assert_spreadsheet_contrast(ctx):
+    """Assert the claim the caption makes, rather than trusting the picture.
+
+    Stored attributes are what the spreadsheet can show; AttrViz's intrinsics
+    are computed and have no stored counterpart.
+    """
+    import attrviz as av
+    obj = bpy.context.view_layer.objects.active
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    mesh = obj.evaluated_get(depsgraph).to_mesh()
+    stored = set(mesh.attributes.keys())
+    obj.evaluated_get(depsgraph).to_mesh_clear()
+
+    for name in ("curv", "grad"):
+        if name not in stored:
+            raise AssertionError(f"{name!r} is not stored; spreadsheet would "
+                                 f"not show it. stored={sorted(stored)}")
+    if "Normal" in stored:
+        raise AssertionError("'Normal' is stored after all — the whole "
+                             "intrinsic-vs-stored contrast is wrong")
+
+    by, _ = av.attributes_by_domain(obj)
+    point = [n for n, _t in by.get("Point", [])]
+    for name in ("Index", "Position", "Normal"):
+        if name not in point:
+            raise AssertionError(f"AttrViz does not offer {name!r} on Point")
+    return {"stored": sorted(stored), "attrviz_point": point}
+
+
 def select_instanced(ctx):
     """Instanced_Cloud has Instance elements and NO mesh elements, which is
     the only way to reach the 'add Realize Instances' guidance."""
@@ -296,6 +417,33 @@ SCENARIOS = [
                  "min_ink_px": 2000},
         "gated": True,
         "doc": "README 'Visualization axes' — Arrows",
+    },
+    {
+        # One attribute, every Display type, in a single image. The cell list
+        # is node_builder.DISPLAYS, so a future type joins on its own.
+        "name": "tableau_displays",
+        "blend": SCOPE_BLEND,
+        "window": (60, 60, 1100, 760),
+        "prefs": PANEL_PREFS,
+        "setup": stage_tableau,
+        "assertions": assert_tableau,
+        "shot": {"kind": "tableau", "crop": "WINDOW", "view": TABLEAU_VIEW,
+                 "overlays": CLEAN_OVERLAYS, "ticks": VIEW_TICKS,
+                 "viz": "VIZ_grad_arrows", "min_cell_px": 500},
+        "gated": True,
+        "doc": "README 'Visualization axes' — same attribute, every Type",
+    },
+    {
+        # Not our panel. The contrast is the point.
+        "name": "spreadsheet_attributes",
+        "blend": SCOPE_BLEND,
+        "window": WIN_STD,
+        "prefs": PANEL_PREFS,
+        "setup": stage_spreadsheet,
+        "assertions": assert_spreadsheet_contrast,
+        "shot": {"kind": "editor", "ticks": VIEW_TICKS},
+        "gated": True,
+        "doc": "README 'What it is' — what AttrViz adds over the spreadsheet",
     },
     {
         # The cascade. Racy by construction (C7b): the sublevel delay cannot go
