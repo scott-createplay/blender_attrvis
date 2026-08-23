@@ -164,3 +164,79 @@ full-panel shots.
 Object names truncate at 420px (`Cube_No...ed`). That is genuine panel UX, but
 a docs shot wanting full names needs a wider sidebar — and there is no clean
 API to set region width, so this is **open**.
+
+---
+
+# Stage 1 — the runner, and why byte-exactness was the wrong gate
+
+`capture.py` (engine, one scenario per launch), `scenarios.py` (registry),
+`run_captures.py` (driver), `compare.py` (pixel diff). The three probes are
+superseded.
+
+**Gate: PASS.** All six scenarios capture; the four gated ones match their
+baselines at **0 px changed**; both failure paths were verified to actually
+fail.
+
+## Byte equality was too strict — and stricter than Playwright
+
+The Stage 1 gate was originally "reproduce byte-identically". It kept failing,
+and each fix moved the failure to a different scenario. The measurement that
+ended it:
+
+| Pair | Changed px | of |
+|---|---|---|
+| menu_domain_face, two runs | **36** | 995,934 |
+| panel_scope_tree, two runs | **8** | 422,180 |
+| menu_scope vs a *different menu* | **4,788** | 995,934 |
+
+Antialiasing noise is ~36px; a real UI change is thousands. Playwright's own
+`toHaveScreenshot` compares with `maxDiffPixels`/`threshold`, not byte
+equality — the tool being modelled had already settled this. Gate is now
+`MAX_DIFF_PX = 200`, roughly 6x the noise floor and 24x below the signal.
+
+## Two real instability sources, found by looking rather than theorising
+
+1. **The 1px active-area outline.** menu_edit differed between runs by exactly
+   4138 px — against an area perimeter of 2x(1309+764) = 4146. Blender colours
+   that border by which area is active at capture time. It is chrome no doc
+   image wants: `INSET = 1` trims it.
+2. **Fixed tick counts.** Replaced with a **settle loop** — capture, hash,
+   require `SETTLE_NEEDED` consecutive identical frames, then shoot. The
+   Playwright analogue is `waitForLoadState('networkidle')`. A tick number is
+   a guess; settling is a measurement.
+
+I twice attributed the drift to a wrong cause (viewport TAA convergence, then
+assertion perturbation) before rendering a diff image. **Render the diff
+first** — it took one look to see the red was only the border.
+
+## `--selfcheck` — new, and it earned its keep immediately
+
+Runs each scenario **twice** and compares. Whether a scenario may be gated is
+an empirical question:
+
+- `menu_root` matched its baseline under a single `--check` and was **not**
+  stable — one sample is not evidence.
+- `menu_edit` did the same thing a run later.
+
+`--check` alone cannot tell "stable" from "lucky". Run `--selfcheck` before
+blessing anything.
+
+## C6 — SOLVED
+
+`wm.quit_blender()` always exits 0, and a timer callback cannot set Blender's
+exit status. `os._exit(0 if ok else 1)` after flushing gives a gate-able code;
+the PNG and report are already on disk, so skipping teardown costs nothing.
+
+Verified both directions: corrupted baseline → exit 1; scene missing the
+target object → `KeyError` in setup → exit 1.
+
+## C7a/C7b may collapse — but not on this evidence
+
+Under pixel tolerance the cascades are stable too: `menu_root` 36 px,
+`menu_visualize_point` 0 px across two passes. The C7a/C7b split was derived
+from *byte* comparison, so it may not survive.
+
+**Left ungated anyway.** The cascade failure mode is bimodal — usually fine,
+occasionally the submenu simply is not open, which is a thousands-of-pixels
+diff that would fail the gate spuriously. Two samples cannot rule that out.
+Re-evaluate with more.

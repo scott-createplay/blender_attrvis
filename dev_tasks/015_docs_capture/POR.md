@@ -380,7 +380,7 @@ answer any of this.
 | **C3** | Does `--factory-startup` + `av.register()` give a reachable Viz tab? | **PASS** — `av._reveal_viz_panel()` opens the sidebar, category reads `Viz`, panel captured and cropped |
 | **C4** | Is window geometry settable and stable? | two runs produce identical pixel dimensions |
 | **C5** | Does an explicit `view_matrix` reproduce framing exactly? | two runs frame identically |
-| **C6** | Does Blender exit cleanly with a status we can gate on? | non-zero on failure, zero on success |
+| **C6** | Does Blender exit cleanly with a status we can gate on? | **PASS** — `os._exit` from the timer; `wm.quit_blender()` always exits 0 and a timer cannot set the status |
 | **C7a** | **Are two runs of the same *editor* scenario byte-identical?** | **PASS** — panel shot md5-identical; viewport-only shot 0 changed px |
 
 Menu mechanics — run **alongside C1/C2, not after**. If M1a fails, the external
@@ -483,14 +483,21 @@ Every stage ships something runnable and is **gated by a validation that can
 fail**. Do not start a stage whose gate depends on an unmeasured primitive.
 Shot inventory and doc placement live in [`DOC_MAP.md`](DOC_MAP.md).
 
-### Stage 1 — the runner (Phase 2)
+### Stage 1 — the runner (Phase 2) — **DONE**
 
-Collapse `probe_menu.py`, `probe_menu2.py`, `probe_panel.py` into one scenario
-registry: setup → assert → wait → capture → teardown.
+`capture.py` (engine), `scenarios.py` (registry), `run_captures.py` (driver),
+`compare.py` (pixel diff). The three probes are superseded.
 
-**Gate:** re-produce the six existing shots **byte-identically** from the
-registry. Their md5s are already recorded, so this is a real regression test on
-day one rather than a smoke test.
+**Gate: PASS**, but the gate itself had to change. "Byte-identical" was the
+wrong bar — two runs differ by ~36px of antialiasing noise, while a real UI
+change moves thousands. Playwright's `toHaveScreenshot` uses `maxDiffPixels`
+rather than hashing bytes; the tool being modelled had already settled this.
+`MAX_DIFF_PX = 200`. Both failure paths verified to actually fail.
+
+Two instability sources fixed: the **1px active-area outline** (trimmed by
+`INSET`) and **fixed tick counts** (replaced by a settle loop that polls until
+the frame stops changing). `--selfcheck` runs a scenario twice, because
+`--check` alone cannot distinguish stable from lucky.
 
 ### Stage 2 — the unmeasured primitives
 
@@ -500,7 +507,9 @@ day one rather than a smoke test.
 | **C5** | does an explicit `view_matrix` reproduce framing? | two runs frame identically |
 | **C6** | is the exit status gate-able? | forced failure exits non-zero, success zero |
 
-C2 blocks Stages 4 and 6. C6 blocks Stage 9.
+C2 blocks Stages 4 and 6. **C6 is already answered** by Stage 1's `os._exit`,
+and the settle loop is most of C2's machinery — an ink assertion is a settle
+plus a differential diff.
 
 ### Stage 3 — validate the validator
 
