@@ -23,9 +23,11 @@ viewport" workflow. AttrViz adds it:
   *evaluated* geometry (so attributes created by Geometry Nodes
   modifiers show up too) and creates a visualizer with sensible
   defaults in one click.
-- **A "Viz" tab in the 3D viewport sidebar** lists all visualizers:
-  toggle, remove, and tune Domain / Attribute / Type / Color plus
-  per-type controls (scale, density, arrow length, tag cap, …).
+- **A "Viz" tab in the 3D viewport sidebar** groups visualizers under
+  the collection each one watches, with a per-collection enable
+  toggle. Expand any visualizer to tune Scope / Domain / Attribute /
+  Type / Color plus per-type controls (scale, density, arrow length,
+  tag cap, …).
 - **GPU Overlay (default on)** draws Markers, Surface, and Arrows as
   unlit Solid-mode ink — no Material Preview required. Turn it off in
   the Viz panel to fall back to the Geometry Nodes + emission material
@@ -65,8 +67,57 @@ copy. Use **Enabled** to show one at a time — no compositing.
 Intrinsics **Index**, **Position**, and **Normal** are always available
 (GN fields / evaluated topology — not frozen authored ids).
 
-Scope: a visualizer can watch a single object, or a whole collection
-through its `Scope` socket — one visualizer covering many objects.
+## Scopes — one visualizer, many objects
+
+Every visualizer watches a **collection** through its `Scope` socket.
+`attrvis` is the default bucket, created the first time something needs
+one — an ordinary collection, not a special case. A file with no
+`attrvis` is a perfectly legal state.
+
+From **RMB → AttrViz → Edit**:
+
+- **Add objects to `<scope>`** links the selection into the active
+  scope. Additive — objects stay in every collection they already
+  belong to.
+- **Remove objects from `<scope>`** is the explicit subtractive half.
+- **New collection from selection…** creates a sibling collection, adds
+  the selection to it, and makes it active.
+
+The Viz panel groups visualizers under their scope:
+
+```
+▼ ☑ attrvis                3 obj / 1 viz
+     ▶ ☑ grad · Point · Arrows
+▼ ☑ attrvis_curvature      1 obj / 1 viz
+     ▶ ☑ curv · Point · Surface
+```
+
+- The **checkbox on a group** enables or disables every visualizer
+  scoped to it. It ANDs with each visualizer's own toggle, so
+  individual states survive a group being switched off and on.
+- **Clicking a group name** makes that collection active — the target
+  for Add / Remove and the default `Scope` for new visualizers. It
+  changes nothing on screen.
+- Every collection is always listed, so a visualizer that is drawing
+  always has a visible row to turn it off with.
+
+This is what lets the **same attribute carry two appearances** at once:
+`K` auto-ranged on one collection, `K` fixed-range on another, both
+visible.
+
+**Partial coverage is normal.** Objects in a scope that don't carry the
+attribute are skipped; the visualizer draws on the ones that do, and
+the panel reports it honestly — `3 objects  -  2 carry grad`. Objects
+nothing is drawn on stay **visible**, rather than being hidden with
+nothing in their place.
+
+Scopes are **flat by default** — AttrViz never nests one inside
+another. Nest deliberately in the outliner if you want a parent scope
+to cover its children; the panel says so when you do.
+
+[`examples/attrviz_scope.blend`](examples/) demonstrates all of the
+above in one scene (rebuild it with
+`examples/build_attr_scope_scene.py`).
 
 ## Install
 
@@ -85,15 +136,25 @@ addon version: **0.5.12**.
 
 ## Tests
 
-```
-# Main suite (GN path + registry)
-blender --background --factory-startup --python-exit-code 1 \
-  --python tests/headless_test.py
+All suites run headless. The GPU overlay itself is not
+headless-testable — the draw handler needs a real viewport — so the
+draw *logic* is factored to take its callables as arguments and tested
+without one.
 
-# GPU sampler / Surface / Arrows geometry (no draw in background)
-blender --background --factory-startup --python-exit-code 1 \
-  --python tests/test_gpu_sample.py
 ```
+blender --background --factory-startup --python-exit-code 1 \
+  --python tests/<suite>.py
+```
+
+| Suite | Covers |
+| --- | --- |
+| `headless_test.py` | main suite — GN path + registry |
+| `test_gpu_sample.py` | GPU sampler, Surface / Arrows geometry, attribute reads |
+| `test_watch_collection.py` | scopes, active scope, group enable, mute scope, coverage |
+| `test_overlay_kinds.py` | texture packing, view cull, occlusion filter |
+| `test_gpu_color.py` | colour mappers, empty-sample handling |
+| `test_draw_guard.py` | per-visualizer failure containment in the draw loop |
+| `test_surface_direct.py` | direct Surface construction |
 
 ## Design notes
 
