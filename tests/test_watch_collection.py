@@ -848,6 +848,124 @@ check("S10 is_watchable alone still accepts it (context-free predicate)",
       gpu_sample.is_watchable(_ghost))
 
 
+
+# === 014: the dtype probe must see the whole scope =========================
+# Since 011 gave visualizers a Scope, Target is normally None and the probe
+# fell back to meshes[0] -- one arbitrary object chosen by collection link
+# order. viz_coverage walked all of them. Two adjacent panel lines, two
+# different object sets. See dev_tasks/014_scope_dtype_probe/POR.md.
+print(chr(10) + "== 014: dtype probe covers the whole scope ==")
+
+
+def _vec_writer(obj, attr_name, data_type='FLOAT_VECTOR'):
+    """GN modifier writing a Point attribute, absent from the original mesh."""
+    ng = bpy.data.node_groups.new(f"W14_{obj.name}", 'GeometryNodeTree')
+    ng.interface.new_socket("Geometry", in_out='INPUT',
+                            socket_type='NodeSocketGeometry')
+    ng.interface.new_socket("Geometry", in_out='OUTPUT',
+                            socket_type='NodeSocketGeometry')
+    gin = ng.nodes.new("NodeGroupInput")
+    gout = ng.nodes.new("NodeGroupOutput")
+    st = ng.nodes.new("GeometryNodeStoreNamedAttribute")
+    st.data_type = data_type
+    st.domain = 'POINT'
+    st.inputs["Name"].default_value = attr_name
+    src = ng.nodes.new("GeometryNodeInputNormal" if data_type == 'FLOAT_VECTOR'
+                       else "GeometryNodeInputIndex")
+    ng.links.new(gin.outputs[0], st.inputs["Geometry"])
+    ng.links.new(src.outputs[0], st.inputs["Value"])
+    ng.links.new(st.outputs["Geometry"], gout.inputs[0])
+    m = obj.modifiers.new("W14", 'NODES')
+    m.node_group = ng
+    return m
+
+
+def _scope14(name, objs):
+    coll = av.new_scope_collection(bpy.context, name)
+    for o in objs:
+        for old in list(o.users_collection):
+            old.objects.unlink(o)
+        coll.objects.link(o)
+    return coll
+
+
+# --- carrier SECOND: the reported case -------------------------------------
+a14 = make_grid("M014_NoAttr_A")
+b14 = make_grid("M014_HasAttr_B")
+_vec_writer(b14, "v14")
+bpy.context.view_layer.update()
+c14 = _scope14("014ScopeSecond", [a14, b14])
+av.set_active_scope(bpy.context, c14)
+viz14 = av.add_visualizer(bpy.context, scope=c14, attribute="v14",
+                          domain="Point", style="Heat", display="Arrows")
+md14 = av.viz_modifier(viz14)
+
+_order = [o.name for o in gpu_sample.watch_meshes_for_visualizer(md14)]
+check("014 the non-carrier really is first in scope",
+      _order and _order[0] == "M014_NoAttr_A", str(_order))
+_dtypes, _dom = av._target_attr_meta(md14)
+check("014 carrier SECOND: dtype still found",
+      _dtypes == ['FLOAT_VECTOR'], f"{_dtypes} domain={_dom}")
+
+# --- carrier FIRST: must give the identical answer -------------------------
+# Guards against a fix that merely reverses the arbitrary choice.
+a14b = make_grid("M014_NoAttr_A2")
+b14b = make_grid("M014_HasAttr_B2")
+_vec_writer(b14b, "v14")
+bpy.context.view_layer.update()
+c14b = _scope14("014ScopeFirst", [b14b, a14b])
+viz14b = av.add_visualizer(bpy.context, scope=c14b, attribute="v14",
+                           domain="Point", style="Heat", display="Arrows")
+md14b = av.viz_modifier(viz14b)
+_dtypes_b, _ = av._target_attr_meta(md14b)
+check("014 carrier FIRST: identical answer",
+      _dtypes_b == _dtypes, f"{_dtypes_b} vs {_dtypes}")
+
+# --- nobody carries it -----------------------------------------------------
+a14c = make_grid("M014_Bare1")
+b14c = make_grid("M014_Bare2")
+c14c = _scope14("014ScopeNone", [a14c, b14c])
+viz14c = av.add_visualizer(bpy.context, scope=c14c, attribute="absent14",
+                           domain="Point", style="Heat", display="Arrows")
+md14c = av.viz_modifier(viz14c)
+_dtypes_c, _ = av._target_attr_meta(md14c)
+check("014 nothing carries it: empty dtype set", _dtypes_c == [],
+      str(_dtypes_c))
+check("014 and coverage agrees nothing is drawn",
+      gpu_overlay.viz_coverage(md14c)[1] == 0,
+      str(gpu_overlay.viz_coverage(md14c)))
+
+# --- both carry it, DIFFERENT dtypes: reported, not resolved ---------------
+# Blender enforces unique names per MESH, so this needs two objects. Rare, but
+# assert it explicitly so the behaviour is a decision rather than an accident.
+a14d = make_grid("M014_Float")
+b14d = make_grid("M014_Vector")
+_vec_writer(a14d, "w14", 'FLOAT')
+_vec_writer(b14d, "w14", 'FLOAT_VECTOR')
+bpy.context.view_layer.update()
+c14d = _scope14("014ScopeMixed", [a14d, b14d])
+viz14d = av.add_visualizer(bpy.context, scope=c14d, attribute="w14",
+                           domain="Point", style="Heat", display="Arrows")
+md14d = av.viz_modifier(viz14d)
+_dtypes_d, _ = av._target_attr_meta(md14d)
+check("014 mixed dtypes: BOTH reported, no winner picked",
+      sorted(_dtypes_d) == ['FLOAT', 'FLOAT_VECTOR'], str(_dtypes_d))
+check("014 mixed dtypes: a vector carrier suppresses the Arrows warning",
+      any(d in av.VECTORISH for d in _dtypes_d), str(_dtypes_d))
+
+# --- THE INVARIANT ---------------------------------------------------------
+# viz_coverage says N objects can be drawn on => the probe must find a dtype.
+# This single assertion would have caught 014.
+print("  -- invariant across every 014 visualizer --")
+for _label, _md in (("carrier second", md14), ("carrier first", md14b),
+                    ("none carry", md14c), ("mixed dtypes", md14d)):
+    _n_obj, _n_draw = gpu_overlay.viz_coverage(_md)
+    _dts, _ = av._target_attr_meta(_md)
+    check(f"014 INVARIANT ({_label}): n_draw>0 implies a dtype",
+          not (_n_draw > 0 and not _dts),
+          f"coverage={( _n_obj, _n_draw)} dtypes={_dts}")
+
+
 print(f"\n== Result: {PASS} passed, {FAIL} failed ==")
 if FAIL:
     sys.exit(1)

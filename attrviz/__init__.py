@@ -799,39 +799,76 @@ def attributes_by_domain(obj):
 
 
 def _target_attr_meta(md):
-    """(data_type, domain_ui) for the watched attribute, best-effort."""
+    """(distinct dtypes carried in scope, domain_ui).
+
+    Returns EVERY dtype found rather than one, so the probe decides nothing.
+    In any ordinary scene the list is empty or holds a single entry: Blender
+    enforces unique attribute names per mesh (a second ``foo`` is renamed
+    ``foo.001``), so a name can only carry two dtypes across two DIFFERENT
+    objects. That is an authoring accident the panel is better placed to report
+    than to resolve. See dev_tasks/014_scope_dtype_probe/POR.md.
+
+    Before 014 this probed ``meshes[0]`` -- one arbitrary object, chosen by
+    collection link order -- so a scope whose first object happened to lack the
+    attribute reported no dtype at all, while viz_coverage counted the carriers
+    one panel line above.
+
+    Reads gpu_overlay._eval_attr_names, the SAME map viz_coverage walks. Two
+    panel lines built from one map over one list cannot drift apart. Do not
+    reintroduce a shortcut that reads the original mesh instead: a modifier can
+    add or remove an attribute, and the two lines would disagree again.
+    """
     try:
         target = node_builder.get_input(md, "Target")
         attr = node_builder.get_input(md, "Attribute")
         domain = node_builder.menu_input_name(md, "Domain")
     except Exception:
-        return None, None
+        return [], None
     if not attr:
-        return None, domain
-    if target is None:
-        try:
-            meshes = gpu_sample.watch_meshes_for_visualizer(md)
-            target = meshes[0] if meshes else None
-        except Exception:
-            target = None
-    if target is None:
-        return None, domain
+        return [], domain
+
     dt = node_builder.intrinsic_dtype(attr)
     if dt is not None:
-        return dt, domain
-    # Fast path: authored attribute on the original mesh (no depsgraph).
-    # Avoids evaluating the viz GN tree just to flip Attr Is Vector.
-    me = getattr(target, "data", None)
-    if me is not None and hasattr(me, "attributes"):
-        a = me.attributes.get(attr)
-        if a is not None:
-            return a.data_type, domain
-    # Fallback: evaluated geometry (modifier-generated attrs).
-    by, _ = attributes_by_domain(target)
-    for name, dtype in by.get(domain, []):
-        if name == attr:
-            return dtype, domain
-    return None, domain
+        return [dt], domain
+
+    if target is not None:
+        meshes = [target]
+    else:
+        try:
+            meshes = gpu_sample.watch_meshes_for_visualizer(md)
+        except Exception:
+            meshes = []
+
+    dg = None
+    try:
+        dg = bpy.context.evaluated_depsgraph_get()
+    except Exception:
+        pass
+
+    found = []
+    for obj in meshes:
+        avail = gpu_overlay._eval_attr_names(obj, dg)
+        if not avail:
+            continue
+        dtype = avail.get(domain, {}).get(attr)
+        if dtype is not None and dtype not in found:
+            found.append(dtype)
+    if found:
+        return found, domain
+
+    # The lean probe declines Instance domain and returns None when it cannot
+    # read the object at all. Fall back to the richer probe only then.
+    for obj in meshes:
+        try:
+            by, _has_faces = attributes_by_domain(obj)
+        except Exception:
+            continue
+        for name, dtype in by.get(domain, []):
+            if name == attr and dtype not in found:
+                found.append(dtype)
+        if found:
+            break
+    return found, domain
 
 
 def _attr_available_on_domain(target, attr, domain):
@@ -862,8 +899,9 @@ def _attr_available_on_domain(target, attr, domain):
 def _sync_attr_is_vector(md):
     """Keep engine Arrow path honest: non-vectors → direction (0,0,0)."""
     try:
-        dtype, _domain = _target_attr_meta(md)
-        is_vec = dtype in VECTORISH
+        dtypes, _domain = _target_attr_meta(md)
+        # Any vector carrier means arrows genuinely draw somewhere.
+        is_vec = any(d in VECTORISH for d in dtypes)
         cur = node_builder.get_input(md, "Attr Is Vector")
         if bool(cur) != bool(is_vec):
             node_builder.set_input(md, "Attr Is Vector", bool(is_vec))
@@ -1562,7 +1600,10 @@ def _draw_viz_body(body, obj, md, attr_name):
     # Domain localizes; Type / Color follow.
     body.prop(obj, "attrviz_domain", text="Domain", expand=True)
     _draw_socket(body, md, "Attribute")
-    dtype, _ = _target_attr_meta(md)
+    dtypes, _ = _target_attr_meta(md)
+    # One dtype is the ordinary case; a mixed scope gets its own message below
+    # rather than silently picking a winner.
+    dtype = dtypes[0] if len(dtypes) == 1 else None
     try:
         target = node_builder.get_input(md, "Target")
     except Exception:
@@ -1586,13 +1627,20 @@ def _draw_viz_body(body, obj, md, attr_name):
             body.label(
                 text="IDs before Subdiv interpolate — use Index",
                 icon='INFO')
+    elif len(dtypes) > 1:
+        body.label(
+            text=(f"“{attr_name}” has {len(dtypes)} types in scope: "
+                  + ", ".join(_dtype_label(d) for d in dtypes)),
+            icon='ERROR')
+        body.label(text="Split the scope, or rename one attribute",
+                   icon='INFO')
     body.prop(obj, "attrviz_display", text="Type", expand=True)
 
     display = node_builder.menu_input_name(md, "Display")
     style = node_builder.menu_input_name(md, "Style")
     colored = display in ("Markers", "Surface")
 
-    if display == "Arrows" and dtype not in VECTORISH:
+    if display == "Arrows" and not any(d in VECTORISH for d in dtypes):
         body.label(
             text="Non-vector → direction (0,0,0); no arrows",
             icon='ERROR')
@@ -1638,7 +1686,7 @@ def _draw_viz_body(body, obj, md, attr_name):
                 _draw_socket(sub, md, "Range Max")
         else:
             body.prop(obj, "attrviz_style", text="Color", expand=True)
-            if style == "RGB" and dtype not in VECTORISH:
+            if style == "RGB" and not any(d in VECTORISH for d in dtypes):
                 body.label(text="RGB expects a vector attribute",
                            icon='INFO')
             if style == "Random":

@@ -229,7 +229,7 @@ _muted_ptrs: set = set()
 
 
 def _eval_attr_names(obj, dg):
-    """{domain_ui: {attribute names}} on the EVALUATED object, or None.
+    """{domain_ui: {attribute name: dtype}} on the EVALUATED object, or None.
 
     Deliberately lean. ``attributes_by_domain()`` is the richer probe, but it
     calls ``evaluated_depsgraph_get()`` and ``evaluated_geometry()`` -- and
@@ -241,6 +241,13 @@ def _eval_attr_names(obj, dg):
     field sources and never appear in ``attributes``, so probing attributes
     alone would wrongly unmute every Normal visualizer. Normal is withheld
     where it does not exist (no vertices -- point clouds).
+
+    Carries dtypes as well as names so that _target_attr_meta can answer "what
+    type is this attribute in scope?" from the SAME map viz_coverage uses for
+    "how many objects carry it". Two panel lines built from one walk of one
+    list cannot drift apart -- which is exactly how they drifted in 014.
+    Callers doing membership tests are unaffected: ``name in by[domain]`` hits
+    dict keys.
     """
     try:
         ev = obj.evaluated_get(dg) if dg is not None else obj
@@ -248,19 +255,19 @@ def _eval_attr_names(obj, dg):
         attrs = getattr(data, "attributes", None)
         if attrs is None:
             return None
-        by = {d: set() for d in node_builder.UI_DOMAINS}
+        by = {d: {} for d in node_builder.UI_DOMAINS}
         b2ui = {v: k for k, v in node_builder.DOMAIN_TO_BLENDER.items()}
         for a in attrs:
             ui = b2ui.get(getattr(a, "domain", None))
             if ui is not None:
-                by[ui].add(a.name)
+                by[ui][a.name] = getattr(a, "data_type", None)
         has_verts = hasattr(data, "vertices")
-        for name, _dtype, domains in node_builder.INTRINSICS:
+        for name, dtype, domains in node_builder.INTRINSICS:
             if name == node_builder.NORMAL_ATTR and not has_verts:
                 continue
             for d in domains:
                 if d in by:
-                    by[d].add(name)
+                    by[d][name] = dtype
         return by
     except Exception:
         return None
