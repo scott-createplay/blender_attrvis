@@ -4,3 +4,6 @@ build/
 *.blend1
 !examples/*.blend
 renders/
+
+# 015 docs-capture probe artifacts (regenerate with probe_menu*.py)
+dev_tasks/015_docs_capture/out/
