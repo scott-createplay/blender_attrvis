@@ -42,14 +42,29 @@ Marker convention per the POR: `<!-- attrviz:begin <name> -->` … `:end`.
 
 | Block | Feeds | Source of truth |
 |---|---|---|
-| `axes-table` | README *Visualization axes* | the `attrviz_domain` / `attrviz_style` / `attrviz_display` enum items — the table is currently hand-transcribed from them |
+| `axes-table` | README *Visualization axes* | **NOT generatable from the enums** — see below |
 | `panel-tree` | README *Scopes*, the ASCII block | `visualizers_by_scope()` + the panel's own row format |
 | `coverage-line` | README *Scopes*, `3 objects - 2 carry grad` | the panel's coverage format string |
 | `scope-list` | README *Scopes* | `scope_collections()` with live counts |
 
-`axes-table` is the highest-value one and is not in the POR's list. It is a
-hand-transcription of three enums; adding a Display type means editing code and
-remembering to edit a markdown table.
+`axes-table` looked like the highest-value block — a hand-transcription of
+three enums. **Measured, it cannot be generated from them.** The shipped Color
+control depends on state, not just the enum:
+
+| Condition | What the panel actually draws |
+|---|---|
+| GPU Overlay **on**, ramp-mapped dtype | ramp preset operators `Heat / RGB / **BnW**` + an editable ColorRamp |
+| GPU Overlay **on**, hash-mapped dtype (int) | `Hash color per id` + a Seed field — no Color buttons at all |
+| GPU Overlay **off** | the `attrviz_style` enum `Heat / RGB / **Random**` |
+
+`node_builder.STYLES` is `("Heat", "RGB", "Random")`, so a naive generator
+would emit "Random" for a UI that says "BnW". Both captures confirm it:
+`panel_scope_tree` shows the hash branch, the earlier scope-scene shot showed
+the BnW branch. The README's single "Color: Heat | RGB | Random" row matches
+**none** of the three exactly.
+
+So `axes-table` must be generated from the *drawing code paths*, or written by
+hand with this caveat stated. Do not generate it from the enum.
 
 ---
 
@@ -111,12 +126,15 @@ The shot list changes the fixture question. Three fixtures are needed, not one:
 
 1. `attrviz_scope.blend` — **exists**, feeds S1-S6, S8-S10.
 2. a default-cube scene for S7 — trivial, scriptable.
-3. an **instanced-geometry** scene for S11 — the un-realized instances case at
-   `__init__.py:1216`, which has no test and no doc.
+3. ~~an instanced-geometry scene~~ — **wrong, corrected.** The menu reads
+   `context.active_object`, so the empty-mesh-domains condition is **per
+   object, not per scene**. `Instanced_Cloud` lives in the same fixture.
 
-That third one is new information: the POR's Phase 1 assumed a single
-`docs_demo.blend`. S11 cannot share a fixture with S1-S6, because the whole
-point is that the mesh domains are *empty*.
+**Superseded: one fixture does it.** `examples/attrviz_docs.blend`, built by
+`examples/build_attr_docs_scene.py`, carries Suzanne (curv + grad, Point),
+Torus_Flow (grad, real torus), Grid_Plates (plate_id, int on Face), Cube_Bare
+(nothing) and Instanced_Cloud (Instance only). Three scopes, three
+visualizers, and the hero is in two scopes at once.
 
 ## Open
 
