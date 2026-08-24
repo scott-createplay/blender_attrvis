@@ -324,6 +324,26 @@ class Capture:
             bpy.ops.screen.screenshot_area(filepath=path)
         return path
 
+    def verify_leaf(self, probe):
+        """Did the final hover land on the attribute row?
+
+        No submenu opens from a leaf, so the proof is the highlight moving
+        inside that menu's own rect. Without it a failed last rung silently
+        reproduces the old picture — the domain category highlighted, which is
+        exactly the image this rung exists to replace.
+        """
+        base, _sb = load_rgba(self.leaf_baseline)
+        cur, _sc = load_rgba(probe)
+        x0, y0, x1, y1 = self.leaf_rect
+        mask = (np.abs(base[:, :, :3] - cur[:, :, :3]) > 0.02).any(axis=2)
+        inside = mask[y0:y1 + 1, x0:x1 + 1]
+        changed = int(inside.sum())
+        report["leaf_highlight_px"] = changed
+        if changed < 600:
+            raise RuntimeError(
+                f"final hover did not land: only {changed}px changed inside "
+                "the attribute menu, so no row highlighted")
+
     def verify_hover(self, probe):
         """Did the hover actually take?
 
@@ -381,6 +401,13 @@ class Capture:
                 "cursor_warp. Open it lower or use a taller window.")
         if sel == "last":
             img_y = y0 + int(self.pitch * 0.8)
+        elif sel < 0:
+            # Counted from the BOTTOM. The attribute list is not uniform rows —
+            # "Intrinsic" and "Attributes" section labels sit between the
+            # entries, so a top-relative index lands on a header. The real
+            # attributes are always the last entries, so -1 and -2 stay
+            # correct however many intrinsics appear above them.
+            img_y = y0 + int(self.pitch * 0.8) + (abs(sel) - 1) * self.pitch
         else:
             # Rows run downward from the top edge; submenus have no title row.
             img_y = y1 - int((sel + 0.5) * self.pitch)
@@ -391,6 +418,13 @@ class Capture:
         self.ctx["window"].cursor_warp(*target)
         self.walk_prev = cur
         self.walk_right = _x1
+        if index == len(self.shot["hover_path"]) - 1:
+            # The final rung is a LEAF: hovering an attribute opens nothing, so
+            # "a submenu appeared" cannot prove it took. Keep the frame and the
+            # rect so the highlight moving inside this menu can be checked
+            # instead.
+            self.leaf_baseline = cur
+            self.leaf_rect = (x0, y0, _x1, y1)
         report.setdefault("walk", []).append(
             {"step": index, "select": sel, "cursor": list(target),
              "bbox": [x0, y0, _x1, y1]})
@@ -617,6 +651,8 @@ class Capture:
         if self.stable >= SETTLE_NEEDED:
             if self.shot.get("hover") == "last":
                 self.verify_hover(probe)
+            elif getattr(self, "leaf_baseline", None):
+                self.verify_leaf(probe)
             report["settle_polls"] = self.settle_polls
             report["settle_tick"] = t
             # Re-read regions: the UI region only exists once the sidebar has

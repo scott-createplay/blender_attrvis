@@ -57,8 +57,14 @@ hand. If you named it `grad`, you'll see `grad`. **If it isn't there, you just
 found your bug.**
 
 > 🖼 **`menu_breadcrumb`** — the full path in one image, left to right: object
-> context menu with AttrViz highlighted → Visualize Attribute → Point → the
-> attribute list with types and defaults. Confirms the three steps above.
+> context menu with AttrViz highlighted → Visualize Attribute → Point → and
+> **`curv` itself highlighted** in the attribute list. The row reads
+> `curv  float  →  Heat / Surface`, which is a promise the next image keeps.
+>
+> 🖼 **`viewport_result`** — what that click produced: the viewport with the
+> Heat surface drawn, and the sidebar open on the Viz tab listing the new
+> visualizer. The first figure in the doc that shows the tool in use rather
+> than one surface of it in isolation.
 
 
 ---
@@ -245,7 +251,8 @@ opening line.
 | Figure | Section | Status |
 |---|---|---|
 | `strip_numbers_to_ink` | banner / The gap | exists |
-| `menu_breadcrumb` | Sixty seconds | exists |
+| `menu_breadcrumb` | Sixty seconds | **deepened to the attribute row** |
+| `viewport_result` | Sixty seconds | **new** — the consequence of the click |
 | `strip_domains` | Domain | **new** |
 | `strip_colors` | Colour | **new** |
 | `tableau_displays` | Type | **re-shot** — Colour pinned to RGB and stated |

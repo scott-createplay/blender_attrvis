@@ -97,6 +97,43 @@ Consequences for the harness:
 
 ---
 
+## The narrative throughline: the click, then the consequence
+
+The two figures that carry the document are a **pair**, and they must be built
+as one idea:
+
+1. **The click.** The RMB chain walked all the way to the *attribute* —
+   `RMB → AttrViz → Visualize Attribute → Point → curv`, with `curv` itself
+   highlighted. Stopping on the domain category shows the menu *offering*
+   attributes and never shows anyone choosing one. The highlight has to be on
+   the row the user's finger is over.
+2. **The consequence.** The full viewport with the sidebar open on the Viz tab,
+   the surface drawn, and that visualizer listed in the panel.
+
+They validate each other: the menu row reads `curv  float  →  Heat / Surface`,
+so the second image is the menu's own promise, kept. Nothing else in the doc
+does that.
+
+This also closes a gap the earlier figure set had: `panel_scope_tree` is the
+sidebar cropped away from the viewport, and `viewport_hero` is the viewport
+with no panel. **Neither shows the tool in use.**
+
+### Two mechanics this depends on
+
+- **Rows are selected from the bottom, not the top.** The attribute list is not
+  uniform rows — `Intrinsic` and `Attributes` section labels sit between the
+  entries, so a top-relative index lands on a header. `curv` and `grad` are the
+  last two entries, so `-2` and `-1` are stable no matter how many intrinsics
+  or headers appear above them, and they survive the object gaining attributes.
+- **A leaf rung needs its own proof.** Every other rung is verified by "a
+  submenu appeared to the right". The attribute row opens nothing, so that
+  check cannot work on it. The leaf is verified by the highlight moving
+  *within* the attribute menu's own rect. Without that, a failed final hover
+  silently reproduces the old image — the same silent-wrong-picture failure
+  this harness keeps having to design against.
+
+---
+
 ## Format constraints — the deliverable is `README.md`
 
 - **Relative paths to `docs/img/*.png`.** Base64 `data:` URIs are stripped by

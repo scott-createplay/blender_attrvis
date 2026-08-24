@@ -39,7 +39,7 @@ PANEL_TICKS = {"warmup": 16, "reveal": 17, "shot": 27}
 # difference between "works alone" and "works in a batch".
 HOVER_WARMUP = 44
 WALK_TICKS = {"warmup": HOVER_WARMUP, "open": HOVER_WARMUP + 1,
-              "nudges": (), "shot": HOVER_WARMUP + 72}
+              "nudges": (), "shot": HOVER_WARMUP + 96}
 HOVER_TICKS = {"warmup": HOVER_WARMUP, "open": HOVER_WARMUP + 1,
                "nudges": (), "shot": HOVER_WARMUP + 24}
 # No menu to open; the settle loop decides when the overlay has finished.
@@ -353,6 +353,58 @@ def assert_batch_spread(ctx):
     return {"carriers": carriers, "non_carriers": bare}
 
 
+def stage_result(ctx):
+    """What the click in menu_breadcrumb produced.
+
+    The viewport and the panel in ONE frame: every other figure shows one
+    surface with the other cropped away, so none of them shows the tool
+    actually in use.
+    """
+    import attrviz as av
+    # Region overlap floats the sidebar OVER the viewport, which would leave
+    # Suzanne half-hidden behind it. Off, the two share the area.
+    bpy.context.preferences.system.use_region_overlap = False
+    out = _solo_suzanne()
+    # Delete the other visualizers rather than just disabling them. This shot
+    # is the state right after ONE click, and a panel listing four greyed-out
+    # visualizers in scopes the staging emptied ("0 obj / 1 viz") describes a
+    # scene nobody has.
+    keep = "VIZ_curv_surface"
+    for obj in [o for o in bpy.data.objects
+                if o.name.startswith("VIZ_") and o.name != keep]:
+        bpy.data.objects.remove(obj, do_unlink=True)
+    viz = _viz(keep)
+    viz.attrviz_enabled = True
+    viz.attrviz_style = "Heat"
+    # Expand the one that was just created, so the reader's eye lands on the
+    # row the menu promised.
+    viz.attrviz_ui_expand = True
+    out["kept"] = keep
+    out.update(_unmute("Suzanne_Measured"))
+    with bpy.context.temp_override(window=ctx["window"], area=ctx["area"],
+                                   region=ctx["regions"].get("WINDOW")):
+        av._reveal_viz_panel(bpy.context)
+    ctx["area"].tag_redraw()
+    return out
+
+
+def assert_result(ctx):
+    """The panel must be showing AND the surface must be drawn — a shot with
+    one of the two missing is not the claim being made."""
+    ui = ctx["regions"].get("UI")
+    if ui is None or ui.width <= 1:
+        raise AssertionError("sidebar is not open")
+    if getattr(ui, "active_panel_category", None) != "Viz":
+        raise AssertionError("sidebar is not on the Viz tab")
+    vizzes = [o.name for o in bpy.data.objects if o.name.startswith("VIZ_")]
+    if vizzes != ["VIZ_curv_surface"]:
+        raise AssertionError(f"expected one visualizer, got {vizzes}")
+    if not bpy.data.objects["VIZ_curv_surface"].attrviz_ui_expand:
+        raise AssertionError("the visualizer is collapsed; its settings are "
+                             "the point of the shot")
+    return {"visualizers": vizzes, "ui_width": ui.width}
+
+
 def stage_noop(ctx):
     """A filmstrip's stages do their own staging.
 
@@ -610,7 +662,9 @@ SCENARIOS = [
         "shot": {"kind": "menu", "menu": "VIEW3D_MT_object_context_menu",
                  "cursor": "highleft", "view": HERO_VIEW,
                  "overlays": CLEAN_OVERLAYS, "ticks": WALK_TICKS,
-                 "hover_path": ["last", 0, 0],
+                 # ...and one rung further, onto `curv` itself: -2 is the
+                 # second entry from the bottom, past the section labels.
+                 "hover_path": ["last", 0, 0, -2],
                  "hud": _active_caption()},
         "gated": False,
         "retries": 3,
@@ -753,6 +807,21 @@ SCENARIOS = [
                             ("RANDOM  FACE ID  INT", stage_color_random)]},
         "gated": True,
         "doc": "README - Colour follows the data type",
+    },
+    {
+        # The consequence of the click walked in menu_breadcrumb.
+        "name": "viewport_result",
+        "blend": SCOPE_BLEND,
+        "window": (20, 20, 1600, 1150),
+        "prefs": PANEL_PREFS,
+        "setup": stage_result,
+        "assertions": assert_result,
+        "shot": {"kind": "panel", "ticks": PANEL_TICKS, "view": HERO_VIEW,
+                 "overlays": CLEAN_OVERLAYS, "min_ink_px": 15000},
+        # No burnt-in caption: the panel states curv - Point - Surface itself,
+        # which is better evidence than a caption repeating it.
+        "gated": True,
+        "doc": "README - the result of the click",
     },
     {
         # Not our panel. The contrast is the point.
