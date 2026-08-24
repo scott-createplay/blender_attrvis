@@ -59,12 +59,7 @@ found your bug.**
 > 🖼 **`menu_breadcrumb`** — the full path in one image, left to right: object
 > context menu with AttrViz highlighted → Visualize Attribute → Point → the
 > attribute list with types and defaults. Confirms the three steps above.
->
-> ⚠ **Currently unreliable.** The captured PNG is good, but the cascade walk
-> stopped reproducing after the fixture grew — the last-row hover computes the
-> right coordinates and Blender does not register it. Fall back to
-> `menu_object_context` (stable, shows AttrViz highlighted with its submenu
-> open) if this is not fixed before authoring.
+
 
 ---
 
@@ -250,7 +245,7 @@ opening line.
 | Figure | Section | Status |
 |---|---|---|
 | `strip_numbers_to_ink` | banner / The gap | exists |
-| `menu_breadcrumb` | Sixty seconds | exists, **not reproducible right now** |
+| `menu_breadcrumb` | Sixty seconds | exists |
 | `strip_domains` | Domain | **new** |
 | `strip_colors` | Colour | **new** |
 | `tableau_displays` | Type | **re-shot** — Colour pinned to RGB and stated |

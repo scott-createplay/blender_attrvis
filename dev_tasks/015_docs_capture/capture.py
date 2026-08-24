@@ -282,7 +282,12 @@ class Capture:
             # Blender runs out of room and flips a submenu back to the left,
             # which scrambles the reading order of the breadcrumb.
             self.cx = area.x + area.width // 9
-            self.cy = area.y + area.height - 70
+            # Leave headroom. A menu that does not fit gets CLAMPED to the
+            # area edge, and a clamped popup stops responding to cursor_warp
+            # — the walk computes the right row and Blender ignores it. The
+            # object context menu is ~650px tall with a title row above the
+            # cursor, so open well below the top.
+            self.cy = area.y + area.height - 180
         elif self.shot.get("cursor") == "high":
             # A long context menu hangs DOWN from the cursor, and its
             # submenus open from whichever row is hovered. Opening near the
@@ -319,6 +324,27 @@ class Capture:
             bpy.ops.screen.screenshot_area(filepath=path)
         return path
 
+    def verify_hover(self, probe):
+        """Did the hover actually take?
+
+        Without this the failure is SILENT: the shot comes back with the first
+        row highlighted and no submenu, exit code 0, and a wrong picture ships.
+        Hovering the AttrViz row opens its submenu to the right, so new ink
+        past the parent menu's edge is the proof. Loud failure lets the driver
+        retry.
+        """
+        base, _sb = load_rgba(self.hover_baseline)
+        cur, _sc = load_rgba(probe)
+        mask = (np.abs(base[:, :, :3] - cur[:, :, :3]) > 0.02).any(axis=2)
+        mask[:, :self.hover_right + 6] = False
+        changed = int(mask.sum())
+        report["hover_submenu_px"] = changed
+        if changed < 400:
+            raise RuntimeError(
+                f"hover did not take: only {changed}px of new ink past the "
+                "menu, so no submenu opened and the first row is still "
+                "highlighted")
+
     def _diff_bbox(self, prev_path, cur_path, min_x=None):
         """Where did new ink appear between these two frames?
 
@@ -347,6 +373,12 @@ class Capture:
         x0, y0, _x1, y1 = self._diff_bbox(
             self.walk_prev, cur,
             min_x=(self.walk_right + 6) if self.walk_right else None)
+        if index == 0 and y1 >= self.ctx["area"].height - 24:
+            # Diagnose the silent failure instead of photographing it.
+            raise RuntimeError(
+                f"menu is clamped to the area top (top={y1}, area height="
+                f"{self.ctx['area'].height}); a clamped popup ignores "
+                "cursor_warp. Open it lower or use a taller window.")
         if sel == "last":
             img_y = y0 + int(self.pitch * 0.8)
         else:
@@ -355,6 +387,7 @@ class Capture:
         area = self.ctx["area"]
         target = (area.x + x0 + int(self.pitch * 1.6), area.y + img_y)
         self.hover_target = target
+        self.nudge_index = 0
         self.ctx["window"].cursor_warp(*target)
         self.walk_prev = cur
         self.walk_right = _x1
@@ -379,7 +412,8 @@ class Capture:
         row here has no submenu, so there is no safety triangle to fight.
         """
         base, (_bw, bh) = load_rgba(self.base_before)
-        cur, _size = load_rgba(self.probe_shot("menuprobe"))
+        probe_path = self.probe_shot("menuprobe")
+        cur, _size = load_rgba(probe_path)
         mask = (np.abs(base[:, :, :3] - cur[:, :, :3]) > 0.02).any(axis=2)
         if not mask.any():
             raise RuntimeError("menu did not draw; cannot locate its rows")
@@ -391,6 +425,12 @@ class Capture:
         y = area.y + bottom_img + int(self.pitch * 0.55)
         x = area.x + left_img + int(self.pitch * 1.5)
         self.hover_target = (x, y)
+        self.nudge_index = 0
+        # Store the PATH: verify_hover re-loads it. Storing the decoded array
+        # here made every verification throw, which looked exactly like the
+        # environmental flake it was meant to diagnose.
+        self.hover_baseline = probe_path
+        self.hover_right = int(xs.max())
         self.ctx["window"].cursor_warp(x, y)
         report["hover_last_row"] = {"menu_bbox_img": [left_img, bottom_img],
                                     "cursor": [x, y]}
@@ -414,19 +454,28 @@ class Capture:
                 self.renudge(t)
                 return
 
+    # Cursor path for re-nudging, in rows above the target. A one-pixel
+    # jitter proved too small to be reliable when several Blender windows are
+    # opened back to back: the hover took when run alone and not in a batch.
+    # Crossing whole rows and landing back on the target is a motion Blender
+    # cannot coalesce away. The sequence ENDS on the target.
+    NUDGE_ROWS = (2.0, 0.0, 1.0, 0.0, 0.0)
+
     def renudge(self, index):
-        """Re-warp with a pixel of jitter.
+        """Re-warp along a path that ends on the target row.
 
         One warp is not enough: the menu is still animating open when the
         first move lands, and afterwards a stationary cursor at a new position
         never produces another motion event — so Blender keeps the row it
-        highlighted at open time. The same lesson as the tableau: a state
-        change needs a fresh event, not just a new value.
+        highlighted at open time.
         """
         if not getattr(self, "hover_target", None):
             return
         x, y = self.hover_target
-        self.ctx["window"].cursor_warp(x + (index % 2), y)
+        step = self.nudge_index % len(self.NUDGE_ROWS)
+        self.nudge_index += 1
+        offset = int(self.NUDGE_ROWS[step] * self.pitch)
+        self.ctx["window"].cursor_warp(x, y + offset)
 
     def nudge(self, index):
         jitter = 1 if index % 2 else 0
@@ -566,6 +615,8 @@ class Capture:
         self.settle_polls += 1
 
         if self.stable >= SETTLE_NEEDED:
+            if self.shot.get("hover") == "last":
+                self.verify_hover(probe)
             report["settle_polls"] = self.settle_polls
             report["settle_tick"] = t
             # Re-read regions: the UI region only exists once the sidebar has
@@ -618,6 +669,14 @@ class Capture:
         self.tick += 1
         try:
             plan = self.ticks
+            if t == 0 and self.shot.get("hover") or                     (t == 0 and self.shot.get("hover_path")):
+                # Park the pointer inside this window immediately. A scenario
+                # that never warps leaves the OS cursor wherever it was, and
+                # the next window can come up without the pointer over it —
+                # after which its popups ignore cursor_warp entirely. This is
+                # why steered menus passed alone and failed in a batch that
+                # began with a scenario that does not warp.
+                self.ctx["window"].cursor_warp(self.cx, self.cy)
             if t == 0 and self.shot.get("view"):
                 report["assertions"].update(
                     apply_view(self.ctx, self.shot["view"]))
@@ -637,7 +696,8 @@ class Capture:
             elif self.shot.get("hover") == "last" and                     t == plan["open"] + 4:
                 self.hover_last_row()
             elif self.shot.get("hover") == "last" and                     t in (plan["open"] + 7, plan["open"] + 9,
-                          plan["open"] + 11):
+                          plan["open"] + 11, plan["open"] + 13,
+                          plan["open"] + 15):
                 self.renudge(t)
             elif self.shot.get("hover_path") and t < plan["shot"]:
                 self.walk_tick(t, plan)

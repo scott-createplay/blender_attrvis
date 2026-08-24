@@ -64,6 +64,21 @@ def run_one(scen, exe, out=None):
     return proc.returncode, proc.stdout
 
 
+def run_with_retries(scen, exe, out=None, announce=True):
+    """Steered menus depend on the window actually receiving cursor motion,
+    which is not guaranteed when many Blender windows open back to back. The
+    capture fails loudly when a hover does not take, so retrying is enough."""
+    tries = scen.get("retries", 0) + 1
+    code, out_text = 1, ""
+    for attempt in range(tries):
+        code, out_text = run_one(scen, exe, out)
+        if code == 0:
+            break
+        if announce and attempt + 1 < tries:
+            print(f"     retry {scen['name']} ({attempt + 1}/{tries - 1})")
+    return code, out_text
+
+
 def compare_pairs(pairs, exe):
     """Compare image pairs by PIXELS, not bytes. One background Blender does
     the decoding, so this driver needs no image library."""
@@ -99,7 +114,7 @@ def selfcheck(chosen, exe):
         os.makedirs(out, exist_ok=True)
         got = {}
         for scen in chosen:
-            code, _ = run_one(scen, exe, out)
+            code, _ = run_with_retries(scen, exe, out, announce=False)
             img = os.path.join(out, scen["name"] + ".png")
             got[scen["name"]] = img if code == 0 and os.path.exists(img) \
                 else None
@@ -153,7 +168,12 @@ def main():
 
     results = []
     for scen in chosen:
-        code, out = run_one(scen, exe)
+        # Steered menus depend on the window actually receiving cursor
+        # motion, which is not guaranteed when many Blender windows open back
+        # to back. The capture now FAILS loudly when a hover does not take,
+        # so a retry is enough — and a scenario that needs three tries still
+        # produces the right image.
+        code, out = run_with_retries(scen, exe)
         img = os.path.join(OUT, scen["name"] + ".png")
         ok = code == 0 and os.path.exists(img)
         results.append((scen, ok, code, img, out))

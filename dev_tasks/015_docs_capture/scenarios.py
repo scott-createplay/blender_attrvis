@@ -28,12 +28,20 @@ WIN_TALL = (20, 20, 1600, 1250)
 # probe_menu2's plan. The nudges exist because Blender holds the parent row
 # while the cursor moves toward an open submenu; at row 0 they are no-ops that
 # still cost ticks, and removing them would change the pixels.
-MENU_TICKS = {"warmup": 14, "open": 15, "nudges": (17, 19, 21, 23), "shot": 31}
+MENU_TICKS = {"warmup": 14, "open": 15, "nudges": (17, 19, 21, 23), "shot": 37}
 # probe_menu's plan — earlier shutter, no nudges, and NO preference changes.
 CASCADE_TICKS = {"warmup": 12, "open": 13, "nudges": (), "shot": 27}
 PANEL_TICKS = {"warmup": 16, "reveal": 17, "shot": 27}
 # Three rungs at 12 ticks each, then room to settle.
-WALK_TICKS = {"warmup": 14, "open": 15, "nudges": (), "shot": 86}
+# Steered menus wait much longer before opening. Measured: the hover fails
+# when another Blender window has just closed — the new window has not taken
+# focus yet, so cursor_warp reaches nothing. Two seconds of warmup is the
+# difference between "works alone" and "works in a batch".
+HOVER_WARMUP = 44
+WALK_TICKS = {"warmup": HOVER_WARMUP, "open": HOVER_WARMUP + 1,
+              "nudges": (), "shot": HOVER_WARMUP + 72}
+HOVER_TICKS = {"warmup": HOVER_WARMUP, "open": HOVER_WARMUP + 1,
+               "nudges": (), "shot": HOVER_WARMUP + 24}
 # No menu to open; the settle loop decides when the overlay has finished.
 VIEW_TICKS = {"warmup": 10, "shot": 12}
 
@@ -100,8 +108,15 @@ def _make_active(name):
 
 def select_hero(ctx):
     """Suzanne_Measured carries grad + curv on Point and is not a visualizer,
-    so ATTRVIZ_MT_visualize.poll passes and the menu lists real attributes."""
-    return _make_active("Suzanne_Measured")
+    so ATTRVIZ_MT_visualize.poll passes and the menu lists real attributes.
+
+    Pin the visualizer state too: menu shots were inheriting whatever the
+    fixture happened to have enabled, so adding a visualizer to the scene
+    silently repainted every menu background.
+    """
+    out = _make_active("Suzanne_Measured")
+    out.update(_only_viz(["VIZ_curv_surface", "VIZ_grad_arrows"]))
+    return out
 
 
 def _viz(name):
@@ -533,7 +548,8 @@ def assert_panel_ready(ctx):
 # --------------------------------------------------------------------------
 # the registry
 # --------------------------------------------------------------------------
-def _menu(name, menu_id, gated=True, window=None, hover=None):
+def _menu(name, menu_id, gated=True, window=None, hover=None,
+          retries=0):
     return {
         "name": name,
         "blend": SCOPE_BLEND,
@@ -547,9 +563,10 @@ def _menu(name, menu_id, gated=True, window=None, hover=None):
         # by FRAMING rather than by changing the scene.
         "shot": {"kind": "menu", "menu": menu_id, "cursor": "third",
                  "view": HERO_VIEW, "overlays": CLEAN_OVERLAYS,
-                 "ticks": MENU_TICKS, "hud": _active_caption(),
-                 "hover": hover},
+                 "ticks": HOVER_TICKS if hover else MENU_TICKS,
+                 "hud": _active_caption(), "hover": hover},
         "gated": gated,
+        "retries": retries,
         "doc": "see DOC_MAP.md",
     }
 
@@ -576,7 +593,7 @@ SCENARIOS = [
     # Needs the TALL window: Blender's object context menu is ~20 entries and
     # clips at 900px, which hides the AttrViz row appended at its bottom.
     _menu("menu_object_context", "VIEW3D_MT_object_context_menu",
-          gated=False, window=WIN_TALL, hover="last"),
+          gated=False, window=WIN_TALL, hover="last", retries=3),
     {
         # The whole path in one image: RMB -> AttrViz -> Visualize Attribute
         # -> Point -> the attributes. Every rung is located by diffing for the
@@ -596,6 +613,7 @@ SCENARIOS = [
                  "hover_path": ["last", 0, 0],
                  "hud": _active_caption()},
         "gated": False,
+        "retries": 3,
         "doc": "README - the RMB path",
     },
     _menu("menu_edit", "ATTRVIZ_MT_edit"),
