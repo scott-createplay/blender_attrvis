@@ -259,6 +259,40 @@ def test_view_cull_offscreen_skipped():
     print(f"  view_cull off-screen: {n_kept}/{n} kept  OK")
 
 
+def test_view_cull_offscreen_feeds_present():
+    """The empty arrays the cull returns are accepted by the present path.
+
+    The producer contract (off-screen -> zero rows) was already tested; what
+    was never tested is that a consumer survives it. This is the join: cull
+    everything away, then hand the result straight to the colour mappers.
+    See dev_tasks/009_empty_sample_crash/POR.md.
+    """
+    import numpy as np
+    sys.path.insert(0, ".")
+    from attrviz.overlay_kind import view_cull_geometric
+    from attrviz import gpu_color
+
+    rw, rh = 800.0, 600.0
+    mat = _ortho_screen_mat(rw, rh)
+
+    n = 32
+    positions = np.full((n, 3), 5000.0, dtype=np.float32)   # all off-screen
+    values = np.tile(np.array([3.0, 4.0, 0.0], np.float32), (n, 1))
+
+    kept_p, kept_v, n_kept = view_cull_geometric(
+        positions, values, mat, rw, rh, cap=50000,
+    )
+    assert n_kept == 0, f"expected 0 kept, got {n_kept}"
+    assert len(kept_p) == 0 and len(kept_v) == 0
+
+    scalars = gpu_color.heat_scalar(kept_v, "FLOAT_VECTOR")
+    assert scalars.shape == (0,), f"heat_scalar -> {scalars.shape}"
+    colors = gpu_color.values_to_colors(kept_v, "FLOAT_VECTOR")
+    assert colors.shape == (0, 4), f"values_to_colors -> {colors.shape}"
+    print(f"  cull -> present on empty: scalars{scalars.shape} "
+          f"colors{colors.shape}  OK")
+
+
 def test_view_cull_no_region_passthrough():
     """When cap=0, returns empty (Cap 0 → draw nothing)."""
     import numpy as np
@@ -346,6 +380,8 @@ if __name__ == "__main__":
     test_view_cull_deterministic()
     print("test_overlay_kinds: view_cull_offscreen")
     test_view_cull_offscreen_skipped()
+    print("test_overlay_kinds: view_cull_offscreen_feeds_present")
+    test_view_cull_offscreen_feeds_present()
     print("test_overlay_kinds: view_cull_cap_zero")
     test_view_cull_no_region_passthrough()
     print("test_overlay_kinds: occlusion_filter_basic")

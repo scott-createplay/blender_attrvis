@@ -1,72 +1,267 @@
-# blender_attrviz
+# AttrViz
 
-Houdini-style attribute visualizers for Blender — first-class, native,
-and zero-mutation. Right-click any object, pick an attribute, see it.
+**See any attribute, on the geometry it belongs to.** Right-click an object,
+pick an attribute, and it draws in the viewport — in Solid shading, without
+touching your mesh, your materials, or your render.
 
-![position visualized as surface RGB](docs/cube_position.png)
+![the same values as numbers and as ink](docs/img/strip_numbers_to_ink.png)
 
-*The default cube, `position`, one click: RMB → Visualize Attribute →
-position. Vector attributes auto-map to RGB on the surface.*
+*The Spreadsheet's columns, and the same values drawn on the object.*
 
-## What it is
+---
 
-Blender has no equivalent of Houdini's visualizers — the geometry
-spreadsheet shows numbers, the Viewer node is transient, and nothing
-gives you persistent, per-object "show me this attribute in the
-viewport" workflow. AttrViz adds it:
+## The gap
 
-- **Visualizers are ordinary scene objects** in a visible
-  `Visualizers` collection. The outliner is the registry; the
-  viewport **eye icon** / **Enabled** toggles each one; delete the
-  object, the visualizer is gone. They save with your .blend.
-- **RMB → Visualize Attribute** lists every attribute on the object's
-  *evaluated* geometry (so attributes created by Geometry Nodes
-  modifiers show up too) and creates a visualizer with sensible
-  defaults in one click.
-- **A "Viz" tab in the 3D viewport sidebar** lists all visualizers:
-  toggle, remove, and tune Domain / Attribute / Type / Color plus
-  per-type controls (scale, density, arrow length, tag cap, …).
-- **GPU Overlay (default on)** draws Markers, Surface, and Arrows as
-  unlit Solid-mode ink — no Material Preview required. Turn it off in
-  the Viz panel to fall back to the Geometry Nodes + emission material
-  path.
+Blender will show you **shape** — the viewport. And it will show you
+**values** — the Spreadsheet editor, hundreds of rows of floats. It will not
+show you the two together.
 
-## Why it's fast (and safe)
+So you cross-reference. Read a row, find the element, hold the mapping in your
+head, repeat.
 
-A visualizer never mutates the object it watches. It *watches* it via
-Object Info / Collection Info through the depsgraph.
+If you work in Geometry Nodes, the **Viewer node** doesn't close this either.
+It shows what the geometry *is* at that point in the tree — at best one
+anonymous field on the active object, while you're inside the node editor. It
+won't tell you what `plate_id` is on *that* face, in the viewport, beside the
+object it belongs to.
 
-**GPU Overlay (default):** sample evaluated attributes → upload GPU
-batches → `POST_VIEW` draw (points, false-color mesh, 4-sided cones).
-Works in **Solid** shading; F12 beauty stays clean (`hide_render` on
-viz carriers).
+AttrViz is that translation. It draws the values onto the geometry.
 
-**Materials fallback:** when GPU Overlay is off, the visualizer's own
-Geometry Nodes modifier generates marker / surface / arrow carriers
-and an emission material reads `vizcol`. Prefer **Material Preview**
-for that path.
+---
 
-Tags stay on a capped BLF text path (semantic strings OK); see Roadmap
-for atlas work.
+## Sixty seconds
 
-## Visualization axes
+Install (see [Install](#install)), then open the sidebar in the 3D viewport
+(`N`) and pick the **Viz** tab.
 
-| Axis | Options | Notes |
-| --- | --- | --- |
-| **Domain** | `Point` \| `Edge` \| `Face` \| `Corner` | Localizes the read — Houdini-style. Face attrs draw on faces, not smeared to points. |
-| **Color** | `Heat` \| `RGB` \| `Random` | Heat = scalar through a ramp. RGB = vector channels. Random = stable hash color per element id (ints / categorical). |
-| **Type** | `Markers` \| `Surface` \| `Arrows` \| `Tags` | **GPU Overlay:** Markers = points, Surface = false-color mesh, Arrows = 4-sided cones. **Tags** = BLF labels (Tag Cap = max count; Size = int px). |
+1. Right-click any object → **AttrViz → Visualize Attribute**
+2. Choose a domain
+3. Choose an attribute
 
-**RMB → Visualize Attribute** opens **domain submenus**, then attributes
-on that domain. Auto-pick is domain-aware (e.g. Face + int → Random +
-Surface). Overridable in the Viz panel; each visualizer owns its engine
-copy. Use **Enabled** to show one at a time — no compositing.
+![right-click through to an attribute](docs/img/menu_breadcrumb.png)
 
-Intrinsics **Index**, **Position**, and **Normal** are always available
-(GN fields / evaluated topology — not frozen authored ids).
+*`RMB → AttrViz → Visualize Attribute → Point → curv`. The row says what it
+will make: `curv  float  →  Heat / Surface`.*
 
-Scope: a visualizer can watch a single object, or a whole collection
-through its `Scope` socket — one visualizer covering many objects.
+That's the whole loop. One click later:
+
+![the visualizer that click created](docs/img/viewport_result.png)
+
+*The surface is drawn, and the new visualizer is listed in the Viz tab — Point,
+`curv`, Surface, exactly what the menu said.*
+
+The menu reads the object **after its modifiers have run**, so an attribute
+your node tree just created is in the list, by name, beside the ones you
+authored by hand. If you named it `grad`, you'll see `grad`.
+
+**If it isn't there, you just found your bug.**
+
+---
+
+## What you're looking at
+
+### Where attributes come from
+
+AttrViz doesn't care who made them:
+
+- **You authored them** — painted, edited, or added as custom layers.
+- **A node tree produced them** — visible because the menu reads evaluated
+  geometry.
+- **They arrived with the file** — USD, Alembic, point caches and sim results
+  routinely carry per-element data you never wrote and currently cannot see at
+  all.
+
+`Index`, `Position` and `Normal` are always offered on top of whatever the
+object carries.
+
+### Domain — where the value lives
+
+- **Point** — vertices. Most attributes live here.
+- **Edge** — edges.
+- **Face** — polygons. A face attribute draws *on the face*, not smeared out to
+  its points.
+- **Corner** — face corners (loops): per-face-per-vertex data, like UVs and
+  split normals.
+- **Instance** — instance references, not the geometry they point at.
+
+Empty domains are skipped rather than greyed out, so the menu doubles as a
+readout of what the object actually has.
+
+![the same object read on Point and on Face](docs/img/strip_domains.png)
+
+*One object, two domains. `curv` on Point is a smooth gradient; `face_id` on
+Face is flat per facet.*
+
+### Colour — how a value becomes a colour
+
+Colour follows the **data type**; it isn't a free choice:
+
+- **Heat** — a scalar through a ramp. By default **Auto Range normalises across
+  everything the visualizer watches**, not per object, so several objects share
+  one scale and can be compared. Turn Auto Range off to set Min/Max yourself.
+- **RGB** — a vector's channels mapped straight to colour.
+- **Random** — a stable colour per id, for ints and categorical data.
+
+![heat, rgb and random](docs/img/strip_colors.png)
+
+*`curv` (float) as a Heat surface, `grad` (vector) as Arrows, `face_id` (int)
+as Random. Arrows carry their own colour rather than a mapped one — the cyan
+here is a setting, not a default.*
+
+### Type — how it's drawn
+
+Type changes *how* a value is drawn, not *which* value is read. Type and Colour
+are independent.
+
+- **Markers** — a point per element. Where things are, and how many.
+- **Surface** — false colour across the mesh. The gradient over a whole form.
+- **Arrows** — cones along a vector. Direction and relative magnitude.
+  **Needs a vector.** Their colour is a per-visualizer setting rather than a
+  mapped one.
+- **Tags** — the value printed as text at the element, for reading an actual
+  number off one. Capped, so it stays legible.
+
+![one attribute drawn four ways](docs/img/tableau_displays.png)
+
+*The same `grad`, as RGB throughout, drawn each of the four ways.*
+
+### It won't touch your render or your file
+
+Visualizers are ordinary objects in a `Visualizers` collection. They save with
+your `.blend`, and they don't appear in an F12 render.
+
+---
+
+## One visualizer, many objects
+
+Point a visualizer at a **collection** rather than an object and every member
+draws the same attribute, the same way, on the same scale. That's what Scope is
+for: scan a scattered set for the one that's wrong instead of clicking through
+them one at a time.
+
+`attrvis` is just the default collection name — rename it, or make your own
+from a selection.
+
+Objects in the scope that don't carry the attribute simply don't get ink. They
+stay visible, plainly undecorated, and the panel reports the count. That
+mismatch is usually the interesting part — those are the objects where your
+tree didn't run.
+
+![six objects on one shared ramp](docs/img/viewport_scope_compare.png)
+
+*One visualizer over six unrelated objects. The torus is plainly hot; the cone
+is grey because it never got the attribute.*
+
+### Why you'd want more than one
+
+Scopes are how you ask **several questions at once**. Wear on the props,
+curvature on the terrain, plate ids on the panels — three collections, three
+visualizers, all drawing together, each with its own attribute, type and range.
+
+It also lets the **same attribute carry two appearances at the same time**:
+auto-ranged on one collection so you can see relative variation, fixed-range on
+another so you can compare against an absolute threshold. Both visible, in the
+same viewport.
+
+That's why the panel is a tree rather than a list — each branch is a separate
+question you've asked of the scene.
+
+---
+
+## Three things you can now do
+
+### Fix a node tree you can't see into
+
+Your scatter density is driven by an attribute that's wrong somewhere.
+Visualize it on Face and the dead patch is obvious in the viewport — no probing
+single rows in the Spreadsheet.
+
+### Check a field before you drive something with it
+
+Look at `grad` as Arrows, confirm the directions are what you meant, *then*
+wire it into instance rotation. That confirmation step doesn't exist in Blender
+today; you wire it up and infer backwards from the result.
+
+![arrows on the mesh](docs/img/viewport_arrows.png)
+
+*`grad · Point · Arrows`. Arrows are additive — they sit on the geometry. Only
+Surface replaces it.*
+
+### Read data you didn't author
+
+A USD or Alembic import lands with attributes you didn't write. There's no tree
+to inspect and nothing to have anticipated. Point a visualizer at it and look.
+
+---
+
+## The UI in detail
+
+### The right-click menu
+
+Domain-first. Each submenu shows only what exists on that domain, with its type
+and the Colour / Type pair it will create — so switching from Point to Face
+changes the list, and a plain mesh is never offered an Instance domain it
+doesn't have.
+
+### The Viz panel
+
+Visualizers group under the collection each one watches.
+
+- The **group checkbox** ANDs with each visualizer's own toggle, so individual
+  states survive a group being switched off and back on.
+- **Clicking a group name** makes that collection active — the destination for
+  Add / Remove, and the default scope for the next visualizer.
+- **One visualizer is expanded at a time.** Opening one closes the others, so
+  compare by switching rather than by expanding both.
+
+<img src="docs/img/panel_scope_tree.png" width="420" alt="the Viz panel">
+
+*Several scopes, live `obj / viz` counts, and one visualizer expanded.*
+
+### Adding and removing objects
+
+Adding is **additive**: an object stays in every collection it already belongs
+to. Scopes are flat unless you nest them yourself in the outliner.
+
+![the Edit menu](docs/img/menu_edit.png)
+
+*`RMB → AttrViz → Edit`. The labels name the destination, because with several
+scopes "Add objects" alone doesn't say where.*
+
+The **Scope** dropdown at the top of the Viz panel switches which collection is
+active — it lists every scope with its live object count, and a filled radio on
+the current one. **New collection from selection…** makes a fresh scope out of
+whatever you have selected.
+
+---
+
+## When you turn it on and see nothing
+
+In the order worth checking:
+
+1. **Wrong domain** — the value is on Face and you're looking at Point.
+2. **The object doesn't carry it** — check the coverage count in the panel.
+3. **GPU Overlay is off** and you're in Solid shading. It's on by default and
+   draws unlit ink in Solid; turn it off only for the materials path, where
+   Material Preview is preferred.
+4. **The geometry is instanced** — the menu says so in place.
+
+![the instanced-geometry guidance](docs/img/menu_instanced.png)
+
+*Mesh domains empty, Instance populated: read it on Instance, or add Realize
+Instances to unpack.*
+
+---
+
+## Limits
+
+- **Tags is capped** and needs a low cap to stay readable on dense meshes.
+- **Auto Range shows no numbers.** With it on, the computed min and max aren't
+  displayed anywhere — you can see the shape of a field but not read its
+  bounds.
+- Sampling cost grows with element count; heavy meshes are slower to refresh.
+
+---
 
 ## Install
 
@@ -80,31 +275,60 @@ blender --command extension build --source-dir attrviz --output-dir build
 blender --command extension install-file --repo user_default --enable build/attrviz-<version>.zip
 ```
 
-Developed against **Blender 5.0+** (tested on 5.0.1 and 5.2.0). Current
-addon version: **0.5.12**.
+Developed against **Blender 5.0+** (tested on 5.0.1 and 5.2.0). Current addon
+version: **0.5.12**.
+
+## Why it's fast (and safe)
+
+A visualizer never mutates the object it watches. It *watches* it via Object
+Info / Collection Info through the depsgraph.
+
+**GPU Overlay (default):** sample evaluated attributes → upload GPU batches →
+`POST_VIEW` draw. Works in **Solid** shading; F12 beauty stays clean
+(`hide_render` on viz carriers).
+
+**Materials fallback:** with GPU Overlay off, the visualizer's own Geometry
+Nodes modifier generates marker / surface / arrow carriers and an emission
+material reads `vizcol`. Prefer **Material Preview** for that path.
 
 ## Tests
 
-```
-# Main suite (GN path + registry)
-blender --background --factory-startup --python-exit-code 1 \
-  --python tests/headless_test.py
+All suites run headless. The GPU overlay itself is not headless-testable — the
+draw handler needs a real viewport — so the draw *logic* is factored to take
+its callables as arguments and tested without one.
 
-# GPU sampler / Surface / Arrows geometry (no draw in background)
-blender --background --factory-startup --python-exit-code 1 \
-  --python tests/test_gpu_sample.py
 ```
+blender --background --factory-startup --python-exit-code 1 \
+  --python tests/<suite>.py
+```
+
+| Suite | Covers |
+| --- | --- |
+| `headless_test.py` | main suite — GN path + registry |
+| `test_gpu_sample.py` | GPU sampler, Surface / Arrows geometry, attribute reads |
+| `test_watch_collection.py` | scopes, active scope, group enable, mute scope, coverage |
+| `test_overlay_kinds.py` | texture packing, view cull, occlusion filter |
+| `test_gpu_color.py` | colour mappers, empty-sample handling |
+| `test_draw_guard.py` | per-visualizer failure containment in the draw loop |
+| `test_surface_direct.py` | direct Surface construction |
+
+Every screenshot in this README is generated from
+[`examples/attrviz_docs.blend`](examples/) and checked for drift; see
+[`dev_tasks/015_docs_capture/`](dev_tasks/015_docs_capture/).
 
 ## Design notes
 
-[`docs/explorations.md`](docs/explorations.md) — design work that is settled enough to
-remember but not scheduled: the constant/varying readout, Tags collapse, and pointers to
-what is parked in the PORs.
+Houdini users: this is the Blender equivalent of attribute visualizers, with
+scopes standing in for groups.
+
+[`docs/explorations.md`](docs/explorations.md) — design work that is settled
+enough to remember but not scheduled: the constant/varying readout, Tags
+collapse, and pointers to what is parked in the PORs.
 
 ## Roadmap
 
-- Tags: dynamic glyph atlas (semantic text at higher caps), then
-  compiled overlay if needed
+- Tags: dynamic glyph atlas (semantic text at higher caps), then compiled
+  overlay if needed
 - HUD overlay for non-geometry data (custom properties, transforms)
 - VDB / volume grid visualization
 - Stronger Edge surface / wire display

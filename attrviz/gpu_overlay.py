@@ -9,6 +9,8 @@ Tags stay on the BLF prototype.
 """
 from __future__ import annotations
 
+import traceback
+
 import bpy
 import gpu
 import numpy as np
@@ -128,6 +130,39 @@ def _viz_cache_key(obj, md, display, extra=()):
         + _present_key(display, sock, extra=extra)
     )
 
+SCOPE_ENABLED_PROP = "attrviz_scope_enabled"
+
+
+def scope_enabled(coll) -> bool:
+    """Is the group of visualizers scoped to ``coll`` enabled? (011 D9)
+
+    Stored on the Collection and never written onto each visualizer, so
+    toggling a collection off and on preserves the individual enable states
+    the user set. Unset reads as enabled: collections predating the property,
+    and any collection in a file saved before 011, stay on.
+    """
+    if coll is None:
+        return True
+    return bool(getattr(coll, SCOPE_ENABLED_PROP, True))
+
+
+def viz_active(obj, md) -> bool:
+    """A visualizer draws iff its own toggle AND its scope's toggle are on.
+
+    Every place that iterates visualizers must use this. In particular
+    _active_watch_targets: if the mute path ignored the collection toggle,
+    disabling a collection would leave its objects muted to BOUNDS with
+    nothing drawn -- exactly the 010 bug, reintroduced.
+    """
+    if obj is None or obj.hide_viewport:
+        return False
+    from . import viz_scope
+    try:
+        return scope_enabled(viz_scope(md))
+    except Exception:
+        return True
+
+
 def _gpu_visualizers(scene):
     from . import visualizers, viz_modifier
     rows = []
@@ -136,6 +171,8 @@ def _gpu_visualizers(scene):
             continue
         md = viz_modifier(obj)
         if md is None:
+            continue
+        if not viz_active(obj, md):
             continue
         try:
             display = node_builder.menu_input_name(md, "Display")
@@ -169,12 +206,16 @@ def _suppress_gn_carriers(scene):
             continue
         if display not in _SUPPRESS_DISPLAYS:
             continue
-        enabled = not obj.hide_viewport
+        enabled = viz_active(obj, md)
         if use_gpu and enabled:
             if md.show_viewport:
                 md.show_viewport = False
         elif enabled and not md.show_viewport:
             md.show_viewport = True
+        elif not enabled and md.show_viewport:
+            # Scope-disabled: nothing set show_viewport for us, unlike the
+            # per-viz toggle which goes through _set_enabled.
+            md.show_viewport = False
     _sync_surface_target_mute(scene)
 
 
@@ -187,7 +228,126 @@ _MUTE_DISPLAY = "WIRE"
 _muted_ptrs: set = set()
 
 
-def _active_watch_targets(scene, kind_name, blender_type, *, collect_wire=False):
+def _eval_attr_names(obj, dg):
+    """{domain_ui: {attribute name: dtype}} on the EVALUATED object, or None.
+
+    Deliberately lean. ``attributes_by_domain()`` is the richer probe, but it
+    calls ``evaluated_depsgraph_get()`` and ``evaluated_geometry()`` -- and
+    _sync_surface_target_mute runs from a depsgraph handler on every update,
+    where forcing an evaluation resyncs the view layer underneath whatever is
+    iterating it. This reads the depsgraph the caller already has.
+
+    Intrinsics (Index / Position / Normal) are added per domain: they are GN
+    field sources and never appear in ``attributes``, so probing attributes
+    alone would wrongly unmute every Normal visualizer. Normal is withheld
+    where it does not exist (no vertices -- point clouds).
+
+    Carries dtypes as well as names so that _target_attr_meta can answer "what
+    type is this attribute in scope?" from the SAME map viz_coverage uses for
+    "how many objects carry it". Two panel lines built from one walk of one
+    list cannot drift apart -- which is exactly how they drifted in 014.
+    Callers doing membership tests are unaffected: ``name in by[domain]`` hits
+    dict keys.
+    """
+    try:
+        ev = obj.evaluated_get(dg) if dg is not None else obj
+        data = getattr(ev, "data", None)
+        attrs = getattr(data, "attributes", None)
+        if attrs is None:
+            return None
+        by = {d: {} for d in node_builder.UI_DOMAINS}
+        b2ui = {v: k for k, v in node_builder.DOMAIN_TO_BLENDER.items()}
+        for a in attrs:
+            ui = b2ui.get(getattr(a, "domain", None))
+            if ui is not None:
+                by[ui][a.name] = getattr(a, "data_type", None)
+        has_verts = hasattr(data, "vertices")
+        for name, dtype, domains in node_builder.INTRINSICS:
+            if name == node_builder.NORMAL_ATTR and not has_verts:
+                continue
+            for d in domains:
+                if d in by:
+                    by[d][name] = dtype
+        return by
+    except Exception:
+        return None
+
+
+def _viz_draws_on(md, obj, cache, dg=None):
+    """Will this visualizer actually put ink on ``obj``?
+
+    Muting means "the GPU overlay replaces the original". If the visualizer's
+    attribute is not available on this object at its domain, nothing is drawn
+    in its place and muting just leaves a hole -- an object hidden with
+    nothing where it was. See dev_tasks/010_mute_scope/POR.md.
+
+    Undeterminable -> True, preserving the previous behaviour. Only a
+    confident "the attribute is absent here" unmutes, so a flaky probe cannot
+    regress the scene into double-drawn originals.
+    """
+    try:
+        attr = node_builder.get_input(md, "Attribute")
+        domain = node_builder.menu_input_name(md, "Domain")
+    except Exception:
+        return True
+    if not attr or not domain:
+        return False        # nothing selected -> nothing drawn
+    if domain == node_builder.INSTANCE_DOMAIN:
+        # Instance attributes live on the instances cloud, not obj.data --
+        # reading them needs the full geometry-set probe this deliberately
+        # avoids. Undeterminable, so keep the previous behaviour.
+        return True
+
+    key = obj.as_pointer()
+    if key in cache:
+        avail = cache[key]
+    else:
+        avail = _eval_attr_names(obj, dg)
+        cache[key] = avail
+    if avail is None:
+        return True
+
+    names = avail.get(domain, ())
+    if attr in names:
+        return True
+    # lowercase "position" aliases the Position intrinsic
+    if attr in node_builder.INTRINSIC_ALIASES:
+        return node_builder.POSITION_ATTR in names
+    return False
+
+
+def viz_coverage(md):
+    """(objects in scope, how many the visualizer can actually draw on).
+
+    Uses _viz_draws_on -- the same predicate that decides muting -- so the
+    number the panel shows cannot disagree with what is drawn. That invariant
+    is what 009 and 010 kept breaking in different directions: a muted object
+    with no ink, then ink with no row.
+
+    Safe to call from panel draw (a UI context). NOT safe from a depsgraph
+    handler: it asks for a depsgraph. See _eval_attr_names.
+    """
+    try:
+        objs = gpu_sample.watch_meshes_for_visualizer(md)
+    except Exception:
+        return 0, 0
+    try:
+        dg = bpy.context.evaluated_depsgraph_get()
+    except Exception:
+        dg = None
+    cache = {}
+    n_draw = 0
+    for obj in objs:
+        try:
+            if _viz_draws_on(md, obj, cache, dg):
+                n_draw += 1
+        except Exception:
+            n_draw += 1
+    return len(objs), n_draw
+
+
+def _active_watch_targets(scene, kind_name, blender_type, *,
+                          collect_wire=False, dg=None):
     """Watched objects of ``blender_type`` while any enabled viz of ``kind_name``.
 
     GPU overlay IS the visual representation — originals must be BOUNDS
@@ -208,6 +368,8 @@ def _active_watch_targets(scene, kind_name, blender_type, *, collect_wire=False)
         md = viz_modifier(viz)
         if md is None:
             continue
+        if not viz_active(viz, md):
+            continue
         try:
             display = node_builder.menu_input_name(md, "Display")
         except Exception:
@@ -226,45 +388,43 @@ def _active_watch_targets(scene, kind_name, blender_type, *, collect_wire=False)
     if not has_kind:
         return []
 
-    def _append(obj, out, seen):
-        if obj is None or obj.type != blender_type:
-            return
-        key = obj.as_pointer()
-        if key in seen:
-            return
-        seen.add(key)
-        out.append((obj, show_wire))
-
-    coll = gpu_sample.scene_watch_collection()
-    if coll is not None:
-        out = []
-        seen = set()
-        for obj in coll.objects:
-            _append(obj, out, seen)
-        return out
-
+    # Union over enabled visualizers of the objects each can actually draw on.
+    # One resolver for both the attrvis and Target-union-Scope cases:
+    # watch_meshes_for_visualizer already applies whichever is in force, and
+    # unlike the old coll.objects walk it recurses nested sub-collections --
+    # which the sampler always did, so those objects were drawn but never
+    # muted.
     out = []
     seen = set()
+    attr_cache = {}
     for md in kind_mds:
         for obj in gpu_sample.watch_meshes_for_visualizer(md):
-            _append(obj, out, seen)
+            if obj is None or obj.type != blender_type:
+                continue
+            key = obj.as_pointer()
+            if key in seen:
+                continue
+            if not _viz_draws_on(md, obj, attr_cache, dg):
+                continue
+            seen.add(key)
+            out.append((obj, show_wire))
     return out
 
 
-def _active_surface_watch_meshes(scene):
+def _active_surface_watch_meshes(scene, dg=None):
     """All watched meshes when any Surface visualizer is active."""
     return _active_watch_targets(
-        scene, "surface", 'MESH', collect_wire=True)
+        scene, "surface", 'MESH', collect_wire=True, dg=dg)
 
 
-def _active_geometric_watch_clouds(scene):
+def _active_geometric_watch_clouds(scene, dg=None):
     """All watched point clouds when any geometric visualizer is active.
 
     Native POINTCLOUD spheres compete with overlay Markers/Arrows/Tags
     at the same centers. Mute to BOUNDS (same helpers as Surface).
     """
     return _active_watch_targets(
-        scene, "geometric", 'POINTCLOUD', collect_wire=False)
+        scene, "geometric", 'POINTCLOUD', collect_wire=False, dg=dg)
 
 
 def _mute_target_solid(obj, show_wire=False):
@@ -349,7 +509,7 @@ def _on_load_post(_dummy):
         pass
 
 
-def _sync_surface_target_mute(scene=None):
+def _sync_surface_target_mute(scene=None, dg=None):
     """Idempotent: mute watch-set solids for active GPU overlay vizs.
 
     Surface → MESH. Geometric (Markers/Arrows/Tags) → POINTCLOUD.
@@ -357,8 +517,15 @@ def _sync_surface_target_mute(scene=None):
     Never from attribute-name discovery — only the resolved watch set.
     """
     scene = scene or bpy.context.scene
-    desired = list(_active_surface_watch_meshes(scene))
-    desired.extend(_active_geometric_watch_clouds(scene))
+    if dg is None:
+        # Not in a handler: safe to ask for one. Inside a depsgraph handler
+        # the caller passes its own -- see _eval_attr_names.
+        try:
+            dg = bpy.context.evaluated_depsgraph_get()
+        except Exception:
+            dg = None
+    desired = list(_active_surface_watch_meshes(scene, dg))
+    desired.extend(_active_geometric_watch_clouds(scene, dg))
     desired_ptrs = {o.as_pointer(): (o, wire) for o, wire in desired}
 
     # Restore anything we muted that is no longer desired.
@@ -1082,6 +1249,20 @@ def _sample_surface(md, style, rmin, rmax, seed):
     }
 
 
+def _empty_entry(skey, pkey, bkey):
+    """A cache entry that draws nothing.
+
+    Zero samples is a legal state, not an error. The view culler is allowed
+    to return nothing when an object leaves the frustum, so every consumer
+    downstream of it has to survive that -- see dev_tasks/009.
+    """
+    return {
+        "batch": None, "n": 0, "empty": True,
+        "sample_key": skey, "present_key": pkey, "key": pkey,
+        "batch_key": bkey, "lut_key": None,
+    }
+
+
 def _refresh_viz(obj, md, display, cap=50000):
     with perf.span(f"overlay.refresh.{display}"):
         return _refresh_viz_impl(obj, md, display, cap=cap)
@@ -1223,11 +1404,7 @@ def _refresh_viz_impl(obj, md, display, cap=50000):
             pass
 
     if sample is None or sample.get("empty") or sample.get("n", 0) == 0:
-        entry = {
-            "batch": None, "n": 0, "empty": True,
-            "sample_key": skey, "present_key": pkey, "key": pkey,
-            "batch_key": bkey,
-        }
+        entry = _empty_entry(skey, pkey, bkey)
         _caches[ptr] = entry
         return entry
 
@@ -1250,6 +1427,15 @@ def _refresh_viz_impl(obj, md, display, cap=50000):
             except Exception:
                 # --background or missing region: skip view pass
                 pass
+
+        # The cull legitimately returns nothing for an off-screen object.
+        # Cache an empty entry and skip the present step entirely rather than
+        # handing a zero-row buffer to a presenter. bkey folds in the view
+        # signature, so this invalidates as soon as the view moves.
+        if len(positions) == 0:
+            entry = _empty_entry(skey, pkey, bkey)
+            _caches[ptr] = entry
+            return entry
 
     with perf.span(f"overlay.present.{display}"):
         if k == "surface":
@@ -1389,6 +1575,52 @@ def _split_geometric_depth(rows):
     return tested, on_top
 
 
+_viz_errors = set()
+
+
+def reset_viz_errors():
+    """Re-arm per-visualizer error reporting (call on re-register / file load)."""
+    _viz_errors.clear()
+
+
+def _note_viz_error(obj, display):
+    """Report one traceback per (object, display), not one per redraw.
+
+    The draw handler runs every frame, so an unguarded print here floods the
+    console at refresh rate and buries the first -- most useful -- traceback.
+    """
+    try:
+        name = obj.name if obj is not None else "?"
+    except Exception:
+        name = "?"
+    key = (name, display)
+    if key in _viz_errors:
+        return
+    _viz_errors.add(key)
+    print(f"AttrViz: visualizer failed on {name!r} ({display}); "
+          f"its overlay is skipped, the rest of the pass continues:")
+    traceback.print_exc()
+
+
+def _draw_rows(rows, refresh, draw):
+    """Refresh + draw each row, containing per-visualizer failures.
+
+    One misbehaving visualizer must not blank every other object's overlay.
+    Split out so the containment rule is testable without a GPU draw context
+    (same reason as _split_geometric_depth).
+
+    Returns False if any row raised.
+    """
+    ok = True
+    for obj, md, display in rows:
+        try:
+            draw(refresh(obj, md, display))
+        except Exception:
+            ok = False
+            _note_viz_error(obj, display)
+    return ok
+
+
 def _draw_callback_view_impl():
     context = bpy.context
     if context.region is None or context.region_data is None:
@@ -1409,31 +1641,36 @@ def _draw_callback_view_impl():
     except Exception:
         pass
 
-    gpu.state.depth_mask_set(True)
-    for obj, md, display in surfaces:
-        _draw_gpu_entry(_refresh_viz(obj, md, display))
-
+    # GPU state is global. Anything that escapes this block leaves Blender's
+    # own drawing with our depth mask / test / face culling for the rest of
+    # the frame, so the restore belongs in a finally.
     try:
-        gpu.state.face_culling_set('NONE')
-    except Exception:
-        pass
-    gpu.state.depth_mask_set(False)
-    depth_tested, on_top = _split_geometric_depth(geometric)
-    for obj, md, display in depth_tested:
-        _draw_gpu_entry(_refresh_viz(obj, md, display))
+        gpu.state.depth_mask_set(True)
+        _draw_rows(surfaces, _refresh_viz, _draw_gpu_entry)
 
-    # Instance-domain ink samples the CENTROID of each instance, which is
-    # inside the instanced geometry by construction — depth-testing it would
-    # hide every marker inside the very object it describes. Draw it over the
-    # top instead. Mesh domains keep the depth test: their ink sits on the
-    # surface and occlusion is meaningful there.
-    if on_top:
+        try:
+            gpu.state.face_culling_set('NONE')
+        except Exception:
+            pass
+        gpu.state.depth_mask_set(False)
+        depth_tested, on_top = _split_geometric_depth(geometric)
+        _draw_rows(depth_tested, _refresh_viz, _draw_gpu_entry)
+
+        # Instance-domain ink samples the CENTROID of each instance, which is
+        # inside the instanced geometry by construction — depth-testing it would
+        # hide every marker inside the very object it describes. Draw it over the
+        # top instead. Mesh domains keep the depth test: their ink sits on the
+        # surface and occlusion is meaningful there.
+        if on_top:
+            gpu.state.depth_test_set('NONE')
+            _draw_rows(on_top, _refresh_viz, _draw_gpu_entry)
+    finally:
+        try:
+            gpu.state.face_culling_set('NONE')
+        except Exception:
+            pass
+        gpu.state.depth_mask_set(True)
         gpu.state.depth_test_set('NONE')
-        for obj, md, display in on_top:
-            _draw_gpu_entry(_refresh_viz(obj, md, display))
-
-    gpu.state.depth_mask_set(True)
-    gpu.state.depth_test_set('NONE')
 
 
 def _tag_view3d_redraw(*_args):

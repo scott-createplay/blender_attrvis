@@ -80,6 +80,49 @@ def _ensure_watch_collection(context):
     return coll
 
 
+def migrate_viz_scope(context=None):
+    """Backfill ``attrvis`` into visualizers that watch nothing (011 Phase 1).
+
+    Before 011 the scene ``attrvis`` collection shadowed every visualizer's own
+    Scope socket, so a visualizer with both sockets unset still sampled the
+    watch set. Now that the shadow is gone, such a visualizer would silently
+    draw nothing. Give it the default scope.
+
+    Only touches visualizers with **both** Target and Scope unset. A visualizer
+    with an explicit Target keeps sampling exactly that -- broadening it to
+    Target u attrvis would be wider than either the old or the new behaviour.
+
+    Idempotent by construction: once Scope is set the visualizer no longer
+    matches, so this needs no version stamp and is safe to call on every load.
+    Returns the number of visualizers repointed.
+    """
+    ctx = context or bpy.context
+    scene = getattr(ctx, "scene", None) or bpy.context.scene
+    if scene is None:
+        return 0
+    coll = bpy.data.collections.get(WATCH_COLLECTION)
+    if coll is None:
+        return 0
+    n = 0
+    for obj in visualizers(scene):
+        md = viz_modifier(obj)
+        if md is None:
+            continue
+        try:
+            if node_builder.get_input(md, "Scope") is not None:
+                continue
+            if node_builder.get_input(md, "Target") is not None:
+                continue
+            node_builder.set_input(md, "Scope", coll)
+        except Exception:
+            continue
+        n += 1
+    if n:
+        print(f"AttrViz: repointed {n} visualizer(s) with no watch set "
+              f"to the default {WATCH_COLLECTION!r} collection")
+    return n
+
+
 def _watch_candidates(context):
     """Selected ∪ active MESH / POINTCLOUD objects, excluding viz carriers."""
     seen = set()
@@ -130,8 +173,136 @@ def _sync_watch_draw(context=None):
         pass
 
 
-def _link_to_watch(context, objects):
-    coll = _ensure_watch_collection(context)
+def active_scope(context=None, create=False):
+    """The collection new actions target (011 D3).
+
+    Falls back to ``attrvis``, creating it only when ``create`` is set: a file
+    with no attrvis is a legal state (D2a), so a read must not manufacture one.
+
+    There is no dangling-pointer case to handle. Blender nulls an ID pointer
+    when its target is deleted -- verified by discovery spike S6 -- so a stale
+    active scope simply reads as None and falls through.
+    """
+    ctx = context or bpy.context
+    scene = getattr(ctx, "scene", None) or bpy.context.scene
+    if scene is None:
+        return None
+    coll = getattr(scene, "attrviz_active_scope", None)
+    if coll is not None:
+        return coll
+    if create:
+        coll = _ensure_watch_collection(ctx)
+        try:
+            scene.attrviz_active_scope = coll
+        except Exception:
+            pass
+        return coll
+    return bpy.data.collections.get(WATCH_COLLECTION)
+
+
+def set_active_scope(context, coll):
+    """Point new actions at ``coll``. Presentational plus targeting only --
+    never enables, disables or mutes anything (D9)."""
+    ctx = context or bpy.context
+    scene = getattr(ctx, "scene", None) or bpy.context.scene
+    if scene is None:
+        return None
+    scene.attrviz_active_scope = coll
+    return coll
+
+
+def scope_collections(scene=None):
+    """Collections AttrViz knows about, discovered by USE not by name (D8).
+
+    ``attrvis`` plus every collection currently referenced by some visualizer's
+    Scope. No naming convention is imposed: scoping a visualizer to an existing
+    ``Buildings`` collection is legal and it shows up here.
+
+    Guarantees every visualizer is reachable from exactly one entry, except one
+    with no Scope at all -- those belong to ``attrvis`` in the UI (D9).
+    """
+    scene = scene or bpy.context.scene
+    out = []
+    seen = set()
+
+    def add(coll):
+        if coll is None or coll.name in seen:
+            return
+        seen.add(coll.name)
+        out.append(coll)
+
+    add(bpy.data.collections.get(WATCH_COLLECTION))
+    if scene is not None:
+        for obj in visualizers(scene):
+            md = viz_modifier(obj)
+            if md is None:
+                continue
+            try:
+                add(node_builder.get_input(md, "Scope"))
+            except Exception:
+                continue
+    return out
+
+
+def viz_scope(md):
+    """The collection a visualizer belongs to in the UI. None Scope -> attrvis
+    so nothing is ever orphaned from the panel (D9)."""
+    try:
+        coll = node_builder.get_input(md, "Scope")
+    except Exception:
+        coll = None
+    if coll is not None:
+        return coll
+    return bpy.data.collections.get(WATCH_COLLECTION)
+
+
+def collection_parent(coll):
+    """The collection that holds ``coll`` as a child, or None.
+
+    AttrViz never creates nested scopes (D2), but the user may nest by hand,
+    and iter_watch_meshes recurses -- so inheritance must be shown, never
+    silent. A panel count that disagrees with what is drawn is the 010 bug.
+    """
+    if coll is None:
+        return None
+    for cand in bpy.data.collections:
+        if cand is coll:
+            continue
+        try:
+            if coll.name in cand.children:
+                return cand
+        except Exception:
+            continue
+    return None
+
+
+def new_scope_collection(context, name=None):
+    """Create a scope collection as a SIBLING under the scene collection.
+
+    Never a child of the active scope. Nesting means inheritance -- because
+    iter_watch_meshes recurses -- so a nested "split out" would not actually
+    split anything: a visualizer scoped to the parent would still cover the
+    objects the user just separated. Topology stays flat unless the user nests
+    by hand in the outliner (011 D2).
+    """
+    ctx = context or bpy.context
+    scene = getattr(ctx, "scene", None) or bpy.context.scene
+    base = (name or "").strip() or f"{WATCH_COLLECTION}_group"
+    coll = bpy.data.collections.new(base)
+    scene.collection.children.link(coll)
+    return coll
+
+
+# Membership is ADDITIVE, never exclusive (011 D4). Putting an object in a
+# second scope does not take it out of the first -- an object legitimately
+# belongs to several scopes when they visualize different attributes. The
+# subtractive half is the explicit "Remove objects from <scope>" action.
+
+
+def _link_to_watch(context, objects, coll=None):
+    """Link objects into ``coll``, defaulting to the active scope (D3)."""
+    if coll is None:
+        coll = active_scope(context, create=True)
     for obj in objects:
         if obj is None:
             continue
@@ -141,8 +312,10 @@ def _link_to_watch(context, objects):
     return coll
 
 
-def _unlink_from_watch(context, objects):
-    coll = bpy.data.collections.get(WATCH_COLLECTION)
+def _unlink_from_watch(context, objects, coll=None):
+    """Unlink objects from ``coll``, defaulting to the active scope (D3)."""
+    if coll is None:
+        coll = active_scope(context)
     if coll is None:
         return None
     scene_coll = context.scene.collection
@@ -162,7 +335,7 @@ def _unlink_from_watch(context, objects):
 def add_visualizer_from_selection(context, **kwargs):
     """GUI add-viz: link selection into attrvis, Scope = that collection."""
     objs = _watch_candidates(context)
-    coll = _link_to_watch(context, objs)
+    coll = _link_to_watch(context, objs)   # active scope, attrvis by default
     kwargs.setdefault("target", None)
     kwargs.setdefault("scope", coll)
     return add_visualizer(context, **kwargs)
@@ -285,10 +458,9 @@ def _reveal_viz_panel(context):
 
 
 def is_visualizer(obj):
-    return (obj is not None and obj.type == 'MESH'
-            and any(md.type == 'NODES' and md.node_group is not None
-                    and md.node_group.get("attrviz_version")
-                    for md in obj.modifiers))
+    """Public alias -- the implementation lives in gpu_sample (011 Phase 2),
+    because is_watchable needs it and cannot import this package."""
+    return gpu_sample.is_visualizer(obj)
 
 
 def visualizers(scene):
@@ -627,39 +799,76 @@ def attributes_by_domain(obj):
 
 
 def _target_attr_meta(md):
-    """(data_type, domain_ui) for the watched attribute, best-effort."""
+    """(distinct dtypes carried in scope, domain_ui).
+
+    Returns EVERY dtype found rather than one, so the probe decides nothing.
+    In any ordinary scene the list is empty or holds a single entry: Blender
+    enforces unique attribute names per mesh (a second ``foo`` is renamed
+    ``foo.001``), so a name can only carry two dtypes across two DIFFERENT
+    objects. That is an authoring accident the panel is better placed to report
+    than to resolve. See dev_tasks/014_scope_dtype_probe/POR.md.
+
+    Before 014 this probed ``meshes[0]`` -- one arbitrary object, chosen by
+    collection link order -- so a scope whose first object happened to lack the
+    attribute reported no dtype at all, while viz_coverage counted the carriers
+    one panel line above.
+
+    Reads gpu_overlay._eval_attr_names, the SAME map viz_coverage walks. Two
+    panel lines built from one map over one list cannot drift apart. Do not
+    reintroduce a shortcut that reads the original mesh instead: a modifier can
+    add or remove an attribute, and the two lines would disagree again.
+    """
     try:
         target = node_builder.get_input(md, "Target")
         attr = node_builder.get_input(md, "Attribute")
         domain = node_builder.menu_input_name(md, "Domain")
     except Exception:
-        return None, None
+        return [], None
     if not attr:
-        return None, domain
-    if target is None:
-        try:
-            meshes = gpu_sample.watch_meshes_for_visualizer(md)
-            target = meshes[0] if meshes else None
-        except Exception:
-            target = None
-    if target is None:
-        return None, domain
+        return [], domain
+
     dt = node_builder.intrinsic_dtype(attr)
     if dt is not None:
-        return dt, domain
-    # Fast path: authored attribute on the original mesh (no depsgraph).
-    # Avoids evaluating the viz GN tree just to flip Attr Is Vector.
-    me = getattr(target, "data", None)
-    if me is not None and hasattr(me, "attributes"):
-        a = me.attributes.get(attr)
-        if a is not None:
-            return a.data_type, domain
-    # Fallback: evaluated geometry (modifier-generated attrs).
-    by, _ = attributes_by_domain(target)
-    for name, dtype in by.get(domain, []):
-        if name == attr:
-            return dtype, domain
-    return None, domain
+        return [dt], domain
+
+    if target is not None:
+        meshes = [target]
+    else:
+        try:
+            meshes = gpu_sample.watch_meshes_for_visualizer(md)
+        except Exception:
+            meshes = []
+
+    dg = None
+    try:
+        dg = bpy.context.evaluated_depsgraph_get()
+    except Exception:
+        pass
+
+    found = []
+    for obj in meshes:
+        avail = gpu_overlay._eval_attr_names(obj, dg)
+        if not avail:
+            continue
+        dtype = avail.get(domain, {}).get(attr)
+        if dtype is not None and dtype not in found:
+            found.append(dtype)
+    if found:
+        return found, domain
+
+    # The lean probe declines Instance domain and returns None when it cannot
+    # read the object at all. Fall back to the richer probe only then.
+    for obj in meshes:
+        try:
+            by, _has_faces = attributes_by_domain(obj)
+        except Exception:
+            continue
+        for name, dtype in by.get(domain, []):
+            if name == attr and dtype not in found:
+                found.append(dtype)
+        if found:
+            break
+    return found, domain
 
 
 def _attr_available_on_domain(target, attr, domain):
@@ -690,8 +899,9 @@ def _attr_available_on_domain(target, attr, domain):
 def _sync_attr_is_vector(md):
     """Keep engine Arrow path honest: non-vectors → direction (0,0,0)."""
     try:
-        dtype, _domain = _target_attr_meta(md)
-        is_vec = dtype in VECTORISH
+        dtypes, _domain = _target_attr_meta(md)
+        # Any vector carrier means arrows genuinely draw somewhere.
+        is_vec = any(d in VECTORISH for d in dtypes)
         cur = node_builder.get_input(md, "Attr Is Vector")
         if bool(cur) != bool(is_vec):
             node_builder.set_input(md, "Attr Is Vector", bool(is_vec))
@@ -795,7 +1005,8 @@ class ATTRVIZ_OT_add(bpy.types.Operator):
 class ATTRVIZ_OT_watch_add(bpy.types.Operator):
     bl_idname = "attrviz.watch_add"
     bl_label = "Add objects"
-    bl_description = "Add selected objects to the attrvis watch collection"
+    bl_description = ("Link the selected objects into the active scope. They "
+                      "stay in every other collection they already belong to")
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -804,8 +1015,9 @@ class ATTRVIZ_OT_watch_add(bpy.types.Operator):
 
     def execute(self, context):
         objs = _watch_candidates(context)
-        _link_to_watch(context, objs)
-        self.report({'INFO'}, f"Added {len(objs)} to attrvis")
+        coll = _link_to_watch(context, objs)
+        name = coll.name if coll is not None else WATCH_COLLECTION
+        self.report({'INFO'}, f"Added {len(objs)} to {name}")
         return {'FINISHED'}
 
 
@@ -1015,14 +1227,106 @@ class ATTRVIZ_MT_visualize(bpy.types.Menu):
             col.label(text="to unpack, or read it on Instance.")
 
 
+class ATTRVIZ_OT_set_active_scope(bpy.types.Operator):
+    bl_idname = "attrviz.set_active_scope"
+    bl_label = "Set Active Scope"
+    bl_description = ("Point Add/Remove objects and new visualizers at this "
+                      "collection. Does not change what is drawn")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    name: bpy.props.StringProperty()
+
+    def execute(self, context):
+        coll = bpy.data.collections.get(self.name)
+        if coll is None:
+            self.report({'WARNING'}, f"No collection named {self.name!r}")
+            return {'CANCELLED'}
+        set_active_scope(context, coll)
+        # Targeting only -- never touches enable state or mute (011 D9).
+        try:
+            gpu_overlay._tag_view3d_redraw()
+        except Exception:
+            pass
+        return {'FINISHED'}
+
+
+class ATTRVIZ_OT_scope_new(bpy.types.Operator):
+    bl_idname = "attrviz.scope_new"
+    bl_label = "New collection from selection"
+    bl_description = ("Add the selected objects to a new sibling collection "
+                      "and make it active. Additive: they stay in every "
+                      "collection they already belong to. Use Remove objects "
+                      "to take them out of one")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    name: bpy.props.StringProperty(
+        name="Name",
+        description="Name for the new scope collection",
+        default="attrvis_group",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_watch_candidates(context))
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        objs = _watch_candidates(context)
+        if not objs:
+            self.report({'WARNING'}, "No watchable objects selected")
+            return {'CANCELLED'}
+        coll = new_scope_collection(context, self.name)
+        _link_to_watch(context, objs, coll)
+        set_active_scope(context, coll)
+        self.report({'INFO'}, f"Added {len(objs)} to {coll.name}")
+        return {'FINISHED'}
+
+
+class ATTRVIZ_MT_scope(bpy.types.Menu):
+    bl_idname = "ATTRVIZ_MT_scope"
+    bl_label = "Active Scope"
+
+    def draw(self, context):
+        layout = self.layout
+        active = active_scope(context)
+        colls = scope_collections(context.scene)
+        if not colls:
+            layout.label(text="none yet - Add objects creates attrvis")
+            return
+        for coll in colls:
+            n = len(gpu_sample.iter_watch_meshes(None, coll))
+            noun = "object" if n == 1 else "objects"
+            op = layout.operator(
+                ATTRVIZ_OT_set_active_scope.bl_idname,
+                text=f"{coll.name}    ({n} {noun})",
+                icon='RADIOBUT_ON' if coll == active else 'RADIOBUT_OFF')
+            op.name = coll.name
+        layout.separator()
+        layout.operator(ATTRVIZ_OT_scope_new.bl_idname,
+                        text="New collection from selection...",
+                        icon='COLLECTION_NEW')
+
+
 class ATTRVIZ_MT_edit(bpy.types.Menu):
     bl_idname = "ATTRVIZ_MT_edit"
     bl_label = "Edit"
 
     def draw(self, context):
         layout = self.layout
-        layout.operator(ATTRVIZ_OT_watch_add.bl_idname, icon='ADD')
-        layout.operator(ATTRVIZ_OT_watch_remove.bl_idname, icon='REMOVE')
+        active = active_scope(context)
+        name = active.name if active is not None else WATCH_COLLECTION
+        # Name the destination: with several scopes, "Add objects" alone does
+        # not say where, and link-vs-move is not guessable from the labels.
+        layout.operator(ATTRVIZ_OT_watch_add.bl_idname,
+                        text=f"Add objects to {name}", icon='ADD')
+        layout.operator(ATTRVIZ_OT_watch_remove.bl_idname,
+                        text=f"Remove objects from {name}", icon='REMOVE')
+        layout.separator()
+        layout.operator(ATTRVIZ_OT_scope_new.bl_idname,
+                        text="New collection from selection...",
+                        icon='OUTLINER_COLLECTION')
 
 
 class ATTRVIZ_MT_root(bpy.types.Menu):
@@ -1040,25 +1344,36 @@ def _context_menu(self, context):
     self.layout.menu(ATTRVIZ_MT_root.bl_idname, icon='HIDE_OFF')
 
 
-def _draw_watch_readout(layout):
-    """Scene-level attrvis coverage — root layout only, not per-viz body."""
-    coll = bpy.data.collections.get(WATCH_COLLECTION)
-    if coll is None:
-        layout.label(text="none — AttrViz → Edit → Add objects")
+def _draw_watch_readout(layout, context=None):
+    """Active scope + its coverage (011 D3).
+
+    Names which collection the number describes. Before 011 this line read
+    "attrvis  N meshes", which meant "everything AttrViz watches"; with scopes
+    that would be a lie the moment anyone splits one out (D2a).
+    """
+    ctx = context or bpy.context
+    active = active_scope(ctx)
+    row = layout.row(align=True)
+    row.label(text="Scope")
+    row.menu(ATTRVIZ_MT_scope.bl_idname,
+             text=active.name if active is not None else "none",
+             icon='OUTLINER_COLLECTION')
+    if active is None:
+        layout.label(text="none - AttrViz > Edit > Add objects")
         return
-    meshes = gpu_sample.iter_watch_meshes(None, coll)
+    meshes = gpu_sample.iter_watch_meshes(None, active)
     if not meshes:
-        layout.label(text="none — AttrViz → Edit → Add objects")
+        layout.label(text="empty - AttrViz > Edit > Add objects")
         return
     names = [o.name for o in meshes]
     n = len(names)
-    noun = "mesh" if n == 1 else "meshes"
+    noun = "object" if n == 1 else "objects"
     if n <= _WATCH_NAME_CAP:
         detail = ", ".join(names)
     else:
-        shown = ", ".join(names[:_WATCH_NAME_CAP])
-        detail = f"{shown}  +{n - _WATCH_NAME_CAP} more"
-    layout.label(text=f"attrvis    {n} {noun} · {detail}")
+        detail = (", ".join(names[:_WATCH_NAME_CAP])
+                  + f"  +{n - _WATCH_NAME_CAP} more")
+    layout.label(text=f"{n} {noun} - {detail}")
 
 
 def _draw_socket(layout, md, name, text=None):
@@ -1110,39 +1425,79 @@ class ATTRVIZ_PT_panel(bpy.types.Panel):
             for o in opened[:-1]:
                 o.attrviz_ui_expand = False
 
-        # One layout panel per viz on the *root* layout only.
-        # panel_prop must not sit inside column/box/split (Blender API).
-        # Header: scan + Enabled + remove. Body: settings when open.
-        for obj in vizzes:
-            md = viz_modifier(obj)
-            attr_name = ""
-            domain = ""
-            display = ""
-            if md is not None:
-                try:
-                    attr_name = node_builder.get_input(md, "Attribute") or ""
-                    domain = node_builder.menu_input_name(md, "Domain") or ""
-                    display = node_builder.menu_input_name(md, "Display") or ""
-                except Exception:
-                    pass
-            # Headline: attr · domain · type — so two viz on the same
-            # attr (e.g. flow Surface vs flow Arrows) stay distinct when collapsed.
-            parts = [p for p in (attr_name or obj.name, domain, display) if p]
-            title = "  ·  ".join(parts) if parts else obj.name
+        # A collection tree, not a filtered list (011 D9). Every collection is
+        # always shown: a filter that hides visualizers which are still drawing
+        # puts ink on screen with no control for it.
+        #
+        # Collection headers are plain full-width rows rather than nested
+        # layout panels, because panel_prop nesting is unverified (D10) and the
+        # per-viz panels must stay on the ROOT layout regardless -- panel_prop
+        # cannot sit inside a box, column or split.
+        active = active_scope(context)
+        for coll, members in visualizers_by_scope(scene):
+            _draw_scope_header(layout, coll, members, active)
+            if coll is not None and not _scope_expanded(coll):
+                continue
+            _draw_viz_rows(layout, members)
 
-            header, body = layout.panel_prop(obj, "attrviz_ui_expand")
-            # text="" required for checkbox-in-header (Blender layout panels).
-            header.prop(obj, "attrviz_enabled", text="")
-            header.label(text=title)
-            op = header.operator(ATTRVIZ_OT_remove.bl_idname, text="",
-                                 icon='X')
-            op.name = obj.name
-            if body is None:
-                continue
-            if md is None:
-                body.label(text="Missing AttrViz modifier", icon='ERROR')
-                continue
-            _draw_viz_body(body, obj, md, attr_name)
+
+def _scope_expanded(coll):
+    return bool(getattr(coll, "attrviz_scope_expand", True))
+
+
+def _draw_scope_header(layout, coll, members, active):
+    """One collection group heading: collapse, enable, activate, count."""
+    row = layout.row(align=True)
+    if coll is None:
+        row.label(text=f"{WATCH_COLLECTION} (missing)", icon='ERROR')
+        return
+    row.prop(coll, "attrviz_scope_expand", text="", emboss=False,
+             icon='TRIA_DOWN' if _scope_expanded(coll) else 'TRIA_RIGHT')
+    # Checking this box changes what is drawn. Clicking the name does not.
+    row.prop(coll, "attrviz_scope_enabled", text="")
+    op = row.operator(ATTRVIZ_OT_set_active_scope.bl_idname,
+                      text=coll.name, emboss=False,
+                      depress=(coll == active))
+    op.name = coll.name
+    n_obj = len(gpu_sample.iter_watch_meshes(None, coll))
+    n_viz = len(members)
+    sub = row.row()
+    sub.alignment = 'RIGHT'
+    sub.label(text=f"{n_obj} obj  /  {n_viz} viz")
+
+
+def _draw_viz_rows(layout, vizzes):
+    """One layout panel per visualizer, on the ROOT layout only."""
+    for obj in vizzes:
+        md = viz_modifier(obj)
+        attr_name = ""
+        domain = ""
+        display = ""
+        if md is not None:
+            try:
+                attr_name = node_builder.get_input(md, "Attribute") or ""
+                domain = node_builder.menu_input_name(md, "Domain") or ""
+                display = node_builder.menu_input_name(md, "Display") or ""
+            except Exception:
+                pass
+        # Headline: attr · domain · type — so two viz on the same
+        # attr (e.g. flow Surface vs flow Arrows) stay distinct when collapsed.
+        parts = [p for p in (attr_name or obj.name, domain, display) if p]
+        title = "  ·  ".join(parts) if parts else obj.name
+
+        header, body = layout.panel_prop(obj, "attrviz_ui_expand")
+        # text="" required for checkbox-in-header (Blender layout panels).
+        header.prop(obj, "attrviz_enabled", text="")
+        header.label(text=title)
+        op = header.operator(ATTRVIZ_OT_remove.bl_idname, text="",
+                             icon='X')
+        op.name = obj.name
+        if body is None:
+            continue
+        if md is None:
+            body.label(text="Missing AttrViz modifier", icon='ERROR')
+            continue
+        _draw_viz_body(body, obj, md, attr_name)
 
 
 def _panel_heat_ramp_node(obj, md):
@@ -1166,14 +1521,89 @@ def _panel_heat_ramp_node(obj, md):
         return None
 
 
+def visualizers_by_scope(scene=None):
+    """[(collection, [viz objects]), ...] in scope-list order (011 D9).
+
+    Membership is by IDENTITY -- viz.Scope is this collection -- not by
+    coverage. An object may live in several collections; listing a visualizer
+    under every collection it happens to touch would make the mapping fuzzy.
+    A visualizer with no Scope is grouped under attrvis so it is never orphaned
+    from the panel.
+    """
+    scene = scene or bpy.context.scene
+    if scene is None:
+        return []
+    groups = {}
+    order = []
+    for coll in scope_collections(scene):
+        groups[coll.name] = (coll, [])
+        order.append(coll.name)
+    for obj in visualizers(scene):
+        md = viz_modifier(obj)
+        coll = viz_scope(md) if md is not None else None
+        key = coll.name if coll is not None else None
+        if key is None or key not in groups:
+            # No Scope and no attrvis in the file: make a home rather than
+            # dropping the visualizer out of the UI entirely.
+            if coll is None:
+                key = WATCH_COLLECTION
+                if key not in groups:
+                    groups[key] = (None, [])
+                    order.append(key)
+            else:
+                groups[key] = (coll, [])
+                order.append(key)
+        groups[key][1].append(obj)
+    return [groups[k] for k in order]
+
+
+def _draw_scope_row(body, md, attr_name):
+    """Scope selector + honest coverage (011 D3/D5).
+
+    Reads "4 objects - 3 carry K". That line is the diagnostic that would have
+    made the original vanishing-boxes report self-explanatory: an object in
+    scope carrying none of the attribute is drawn on by nothing, and 010 leaves
+    it unmuted rather than hiding it with nothing in its place.
+    """
+    col = body.column(align=True)
+    _draw_socket(col, md, "Scope")
+
+    coll = viz_scope(md)
+    if coll is None:
+        col.label(text="no scope - nothing is drawn", icon='ERROR')
+        return
+    n_obj, n_draw = gpu_overlay.viz_coverage(md)
+    if n_obj == 0:
+        col.label(text=f"{coll.name}: empty - nothing is drawn", icon='INFO')
+    else:
+        noun = "object" if n_obj == 1 else "objects"
+        label = f"{n_obj} {noun}"
+        if attr_name:
+            label += f"  -  {n_draw} carry {attr_name}"
+        icon = 'INFO' if n_draw < n_obj else 'NONE'
+        col.label(text=label, icon=icon)
+
+    parent = collection_parent(coll)
+    if parent is not None:
+        # Nesting is inheritance. Never let it be silent (D2).
+        col.label(text=f"inside {parent.name} - counts include inherited",
+                  icon='OUTLINER_COLLECTION')
+
+
 def _draw_viz_body(body, obj, md, attr_name):
     """Controls for one visualizer — parented under ``body`` only."""
     body.active = bool(obj.attrviz_enabled)
 
+    _draw_scope_row(body, md, attr_name)
+    body.separator()
+
     # Domain localizes; Type / Color follow.
     body.prop(obj, "attrviz_domain", text="Domain", expand=True)
     _draw_socket(body, md, "Attribute")
-    dtype, _ = _target_attr_meta(md)
+    dtypes, _ = _target_attr_meta(md)
+    # One dtype is the ordinary case; a mixed scope gets its own message below
+    # rather than silently picking a winner.
+    dtype = dtypes[0] if len(dtypes) == 1 else None
     try:
         target = node_builder.get_input(md, "Target")
     except Exception:
@@ -1197,13 +1627,20 @@ def _draw_viz_body(body, obj, md, attr_name):
             body.label(
                 text="IDs before Subdiv interpolate — use Index",
                 icon='INFO')
+    elif len(dtypes) > 1:
+        body.label(
+            text=(f"“{attr_name}” has {len(dtypes)} types in scope: "
+                  + ", ".join(_dtype_label(d) for d in dtypes)),
+            icon='ERROR')
+        body.label(text="Split the scope, or rename one attribute",
+                   icon='INFO')
     body.prop(obj, "attrviz_display", text="Type", expand=True)
 
     display = node_builder.menu_input_name(md, "Display")
     style = node_builder.menu_input_name(md, "Style")
     colored = display in ("Markers", "Surface")
 
-    if display == "Arrows" and dtype not in VECTORISH:
+    if display == "Arrows" and not any(d in VECTORISH for d in dtypes):
         body.label(
             text="Non-vector → direction (0,0,0); no arrows",
             icon='ERROR')
@@ -1249,7 +1686,7 @@ def _draw_viz_body(body, obj, md, attr_name):
                 _draw_socket(sub, md, "Range Max")
         else:
             body.prop(obj, "attrviz_style", text="Color", expand=True)
-            if style == "RGB" and dtype not in VECTORISH:
+            if style == "RGB" and not any(d in VECTORISH for d in dtypes):
                 body.label(text="RGB expects a vector attribute",
                            icon='INFO')
             if style == "Random":
@@ -1297,16 +1734,34 @@ CLASSES = (
     ATTRVIZ_OT_remove,
     ATTRVIZ_OT_ramp_preset,
     ATTRVIZ_OT_use_viz_display_shading,
+    ATTRVIZ_OT_set_active_scope,
+    ATTRVIZ_OT_scope_new,
     ATTRVIZ_MT_domain_point,
     ATTRVIZ_MT_domain_edge,
     ATTRVIZ_MT_domain_face,
     ATTRVIZ_MT_domain_corner,
     ATTRVIZ_MT_domain_instance,
     ATTRVIZ_MT_visualize,
+    ATTRVIZ_MT_scope,
     ATTRVIZ_MT_edit,
     ATTRVIZ_MT_root,
     ATTRVIZ_PT_panel,
 )
+
+
+def _update_scope_enabled(self, context):
+    """Collection toggle changed: resync carriers, mute and the viewport.
+
+    suppress_gn_carriers also calls _sync_surface_target_mute, which is what
+    restores display_type on the objects of a collection just switched off.
+    """
+    try:
+        scene = getattr(context, "scene", None) or bpy.context.scene
+        gpu_overlay.invalidate_all()
+        gpu_overlay.suppress_gn_carriers(scene)
+        gpu_overlay._tag_view3d_redraw()
+    except Exception:
+        pass
 
 
 def _update_hash_seed(self, context):
@@ -1396,7 +1851,10 @@ def _note_frame_change(scene, depsgraph=None):
 def _sync_vizcol_active(scene, depsgraph):
     """Workbench Attribute shading needs active Color Attribute on eval mesh."""
     try:
-        gpu_overlay.sync_surface_target_mute(scene)
+        # Pass the handler's own depsgraph: the mute probe reads evaluated
+        # attributes, and calling evaluated_depsgraph_get() from inside a
+        # depsgraph handler resyncs the view layer mid-iteration.
+        gpu_overlay.sync_surface_target_mute(scene, dg=depsgraph)
     except Exception:
         pass
     name = node_builder.VIZCOL_ATTR
@@ -1433,6 +1891,19 @@ def _sync_vizcol_active(scene, depsgraph):
             pass
 
 
+@persistent
+def _on_load_migrate(_dummy):
+    """File open: pre-011 files may hold visualizers with no watch set.
+
+    Registered on load_post rather than folded into gpu_overlay's handler so
+    migration lives with the code that owns WATCH_COLLECTION and visualizers().
+    """
+    try:
+        migrate_viz_scope()
+    except Exception:
+        pass
+
+
 def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
@@ -1443,6 +1914,24 @@ def register():
         bpy.app.handlers.frame_change_post.append(_note_frame_change)
     if _sync_vizcol_active not in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.append(_sync_vizcol_active)
+    bpy.types.Collection.attrviz_scope_expand = bpy.props.BoolProperty(
+        name="Expand",
+        description="Show the visualizers scoped to this collection",
+        default=True,
+    )
+    bpy.types.Collection.attrviz_scope_enabled = bpy.props.BoolProperty(
+        name="Enabled",
+        description=("Draw the visualizers scoped to this collection. "
+                     "Individual visualizer toggles are preserved"),
+        default=True,
+        update=_update_scope_enabled,
+    )
+    bpy.types.Scene.attrviz_active_scope = bpy.props.PointerProperty(
+        name="Active Scope",
+        description=("Collection that Add/Remove objects and new visualizers "
+                     "target. Does not change what is drawn"),
+        type=bpy.types.Collection,
+    )
     bpy.types.Object.attrviz_ui_expand = bpy.props.BoolProperty(
         name="Expand",
         description="Show this visualizer's settings (one open at a time)",
@@ -1488,14 +1977,23 @@ def register():
         min=0,
         update=_update_hash_seed,
     )
+    if _on_load_migrate not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_on_load_migrate)
     bpy.types.VIEW3D_MT_object_context_menu.append(_context_menu)
     tags_draw.register()
     gpu_overlay.register()
+    # Enabling the add-on with a pre-011 file already open must migrate too.
+    try:
+        migrate_viz_scope()
+    except Exception:
+        pass
 
 
 def unregister():
     gpu_overlay.unregister()
     tags_draw.unregister()
+    if _on_load_migrate in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_on_load_migrate)
     if _sync_vizcol_active in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(_sync_vizcol_active)
     if _note_depsgraph_epochs in bpy.app.handlers.depsgraph_update_post:
@@ -1507,6 +2005,11 @@ def unregister():
                  "attrviz_style", "attrviz_display", "attrviz_seed"):
         if hasattr(bpy.types.Object, attr):
             delattr(bpy.types.Object, attr)
+    if hasattr(bpy.types.Scene, "attrviz_active_scope"):
+        delattr(bpy.types.Scene, "attrviz_active_scope")
+    for _attr in ("attrviz_scope_enabled", "attrviz_scope_expand"):
+        if hasattr(bpy.types.Collection, _attr):
+            delattr(bpy.types.Collection, _attr)
     # Drop leftover from the abandoned UIList experiment.
     if hasattr(bpy.types.Scene, "attrviz_viz_index"):
         delattr(bpy.types.Scene, "attrviz_viz_index")

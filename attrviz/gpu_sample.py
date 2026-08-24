@@ -39,8 +39,30 @@ def attr_text(val) -> str:
     return str(val)
 
 
+def is_visualizer(obj) -> bool:
+    """True for an AttrViz visualizer carrier object.
+
+    Lives here rather than only in the package __init__ because is_watchable
+    needs it and gpu_sample cannot import the package. Its body touches only
+    obj.type and obj.modifiers, so there is no circular dependency.
+    """
+    return (obj is not None and getattr(obj, "type", None) == 'MESH'
+            and any(md.type == 'NODES' and md.node_group is not None
+                    and md.node_group.get("attrviz_version")
+                    for md in obj.modifiers))
+
+
 def is_watchable(obj) -> bool:
-    return obj is not None and getattr(obj, "type", None) in WATCH_TYPES
+    """True for an object a visualizer may sample.
+
+    Carriers are excluded: _watch_candidates filters them at *selection* time,
+    which a hand-managed scope collection bypasses entirely. Once Scope is
+    per-visualizer (011) a carrier can be dragged into a scope in the outliner,
+    and sampling a visualizer's own carrier is self-visualization.
+    """
+    return (obj is not None
+            and getattr(obj, "type", None) in WATCH_TYPES
+            and not is_visualizer(obj))
 
 
 def _geom_has_verts(geom) -> bool:
@@ -567,16 +589,72 @@ def _sample_evaluated_impl(
     return positions, values, dtype
 
 
+def _scene_collection_ptrs(scene=None):
+    """Pointers of every collection reachable from the scene's root collection.
+
+    Used in preference to ``view_layer.objects``, which is resynced LAZILY: an
+    object linked moments earlier can still be missing from it, and filtering
+    on that would drop freshly-added objects out of a watch set. Collection
+    membership is plain data and always current.
+
+    Returns None when the scene cannot be determined, so the caller keeps
+    everything rather than silently emptying a watch set.
+    """
+    try:
+        scene = scene or bpy.context.scene
+        root = scene.collection if scene is not None else None
+    except Exception:
+        return None
+    if root is None:
+        return None
+    out = set()
+    stack = [root]
+    while stack:
+        coll = stack.pop()
+        ptr = coll.as_pointer()
+        if ptr in out:
+            continue
+        out.add(ptr)
+        try:
+            stack.extend(coll.children)
+        except Exception:
+            pass
+    return out
+
+
+def _in_scene(obj, coll_ptrs) -> bool:
+    """Is obj linked, directly or through nesting, into this scene?"""
+    if coll_ptrs is None:
+        return True
+    try:
+        return any(c.as_pointer() in coll_ptrs for c in obj.users_collection)
+    except Exception:
+        return True
+
+
 def iter_watch_meshes(target, scope) -> List[bpy.types.Object]:
-    """Resolve Target object + Scope collection → watchable objects."""
+    """Resolve Target object + Scope collection -> watchable objects.
+
+    Objects not linked into this scene are dropped. A Collection is
+    scene-independent data: it can hold objects that belong to no scene at all,
+    and those have no evaluated state here, so sampling them describes geometry
+    nobody can see. Discovery spike S10 found iter_watch_meshes returning
+    exactly such an object.
+
+    Undeterminable -> keep, so a missing context never silently empties a
+    watch set.
+    """
     seen = set()
     out: List[bpy.types.Object] = []
+    scene_colls = _scene_collection_ptrs()
 
     def add(obj):
         if not is_watchable(obj):
             return
         key = obj.as_pointer()
         if key in seen:
+            return
+        if not _in_scene(obj, scene_colls):
             return
         seen.add(key)
         out.append(obj)
@@ -600,13 +678,14 @@ def scene_watch_collection():
 def watch_meshes_for_visualizer(md) -> List[bpy.types.Object]:
     """Watchable objects this viz should sample (meshes and point clouds).
 
-    If scene collection ``attrvis`` exists, it is the watch set for every
-    visualizer (empty → nothing draws). Otherwise fall back to the
-    modifier Target ∪ Scope sockets (tests, files without attrvis).
+    Resolved from the visualizer's OWN Target and Scope sockets. The scene
+    ``attrvis`` collection is the default Scope handed to new visualizers, not
+    a global override -- it used to shadow every visualizer's own Scope, which
+    made per-visualizer scoping impossible. See dev_tasks/011_viz_scope/POR.md.
+
+    A visualizer with neither socket set watches nothing. migrate_viz_scope()
+    backfills ``attrvis`` into those on load so pre-011 files keep working.
     """
-    coll = scene_watch_collection()
-    if coll is not None:
-        return iter_watch_meshes(None, coll)
     try:
         target = node_builder.get_input(md, "Target")
         scope = node_builder.get_input(md, "Scope")
@@ -982,9 +1061,10 @@ def buffer_stats(result: SampleResult) -> dict[str, Any]:
         "val_shape": tuple(getattr(values, "shape", ())),
     }
     if np.issubdtype(values.dtype, np.floating):
-        flat = values.reshape(len(values), -1)
-        stats["val_min"] = float(flat.min()) if flat.size else None
-        stats["val_max"] = float(flat.max()) if flat.size else None
+        # min/max are reshape-invariant, so the (N, -1) reshape bought nothing
+        # and raised on an empty array -- the guard below was one line too late.
+        stats["val_min"] = float(values.min()) if values.size else None
+        stats["val_max"] = float(values.max()) if values.size else None
     elif np.issubdtype(values.dtype, np.integer):
         stats["val_min"] = int(values.min()) if values.size else None
         stats["val_max"] = int(values.max()) if values.size else None
