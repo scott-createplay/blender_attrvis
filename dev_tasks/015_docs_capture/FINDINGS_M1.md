@@ -420,3 +420,64 @@ requires the frame to change before a cell is accepted, so if the scenario's
 `setup` has already produced stage 0's state, stage 0 is a no-op and the cell
 never settles. That is exactly how it failed first time; `stage_noop` is the
 fix.
+
+---
+
+# HUD captions, and why the menu shots start below the root
+
+## The HUD
+
+Optional per scenario: `hud` is a **callable**, not a string. It reads the
+visualizer through the same three calls the panel's own header uses —
+`node_builder.get_input(md, "Attribute")`, `menu_input_name(md, "Domain")`,
+`menu_input_name(md, "Display")` — so a burnt-in caption cannot disagree with
+the panel in the next screenshot. Rename the attribute or change the Type and
+the caption follows.
+
+Bottom-right, because every menu and popup here opens toward the upper LEFT
+(the cursor sits a third across), so the right edge is the reliably empty one.
+`_clean()` strips characters the 5x7 font has no glyph for — an underscore was
+rendering as a filled box, so `Suzanne_Measured` read as `SUZANNEDMEASURED`.
+
+Menu shots caption the **active object**, because the menu itself never says
+whose attributes it is listing — with several objects in the scene that is
+genuinely ambiguous.
+
+The tableau omits Display from its caption: it varies per cell, so a caption
+spanning the whole image must not claim one.
+
+## Why the menu shots start below the root — measured
+
+`wm.call_menu(name=X)` opens **X as its own root**. There is no parent chain
+above it, so `menu_visualize_point` begins at "Visualize Attribute" because
+that *is* the root of that popup. Nothing is missing from the capture; the
+capture simply never had a parent.
+
+The real chain is four levels:
+
+```
+RMB -> VIEW3D_MT_object_context_menu   (Blender's, ~20 entries)
+        └── AttrViz            ATTRVIZ_MT_root      <- appended at the BOTTOM
+             └── Visualize Attribute   ATTRVIZ_MT_visualize
+                  └── Point/Edge/Face  ATTRVIZ_MT_domain_*
+```
+
+`menu_object_context` now captures level 1, and the AttrViz row **is visible at
+the bottom** — but only after moving that scenario to the tall window. At
+1600x900 Blender's context menu is taller than the window and clips exactly
+where AttrViz sits, so the first capture proved the entry existed by omitting
+it.
+
+**A single image of the whole expanded chain is not reliably capturable.** It
+needs hovering onto a row that is not the first, and M1g measured that as racy
+(the safety triangle). The honest alternative is a labelled filmstrip of the
+levels side by side — the engine for it already exists (`strip_numbers_to_ink`)
+— rather than a cascade that only sometimes comes out right.
+
+## Menu shots are framed, not pruned
+
+Menu scenarios now apply `HERO_VIEW` + `CLEAN_OVERLAYS`. They must **not** drop
+objects from scopes the way viewport shots do: `menu_scope` prints live
+collection counts and `menu_edit` names the active scope, so pruning the scene
+would change the very text being documented. Neighbours are removed by
+**framing**, which changes nothing the menu reads.

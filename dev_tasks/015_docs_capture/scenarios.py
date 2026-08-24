@@ -212,6 +212,54 @@ def _drop_from_scopes(names):
     return {"dropped_from_scope": dropped}
 
 
+def _clean(text):
+    """The bitmap font has no glyph for punctuation like the panel's middot or
+    an underscore; unmapped characters would render as boxes."""
+    from bitfont import GLYPHS
+    return "".join(c if c.upper() in GLYPHS else " " for c in text)
+
+
+def _viz_caption(viz_name, omit_display=False):
+    """Read the caption off the visualizer itself.
+
+    Every field here is live: rename the attribute, change the domain or the
+    Type, and the burnt-in caption follows. A typed caption would not.
+    """
+    def hud(ctx):
+        import attrviz as av
+        from attrviz import node_builder
+        viz = bpy.data.objects[viz_name]
+        md = av.viz_modifier(viz)
+        # The same three reads the panel's own header uses, so the burnt-in
+        # caption cannot disagree with the panel in the next screenshot.
+        attr = node_builder.get_input(md, "Attribute") or viz.name
+        domain = node_builder.menu_input_name(md, "Domain") or "?"
+        display = node_builder.menu_input_name(md, "Display") or "?"
+        dtypes, _dom = av._target_attr_meta(md)
+        dtype = "/".join(sorted(dtypes)) if dtypes else "?"
+        scope = av.viz_scope(md)
+        head = f"{attr}  {domain}" if omit_display else             f"{attr}  {domain}  {display}"
+        return [_clean(head),
+                _clean(f"{dtype}  scope {getattr(scope, 'name', 'none')}")]
+    return hud
+
+
+def _active_caption(extra=""):
+    """For menu shots: which object's attributes are being listed.
+
+    The menu itself never says. With several objects in the scene a reader
+    cannot tell whose attributes these are, which is exactly the ambiguity a
+    caption should remove.
+    """
+    def hud(ctx):
+        obj = bpy.context.view_layer.objects.active
+        lines = [_clean(f"active  {obj.name if obj else 'none'}")]
+        if extra:
+            lines.append(_clean(extra))
+        return lines
+    return hud
+
+
 def stage_noop(ctx):
     """A filmstrip's stages do their own staging.
 
@@ -395,16 +443,21 @@ def assert_panel_ready(ctx):
 # --------------------------------------------------------------------------
 # the registry
 # --------------------------------------------------------------------------
-def _menu(name, menu_id, gated=True):
+def _menu(name, menu_id, gated=True, window=None):
     return {
         "name": name,
         "blend": SCOPE_BLEND,
-        "window": WIN_STD,
+        "window": window or WIN_STD,
         "prefs": MENU_PREFS,
         "setup": select_hero,
         "assertions": assert_attrs_on_active,
+        # Frame on Suzanne and strip the studio furniture. Menu shots must not
+        # drop objects from scopes — menu_scope prints live collection counts,
+        # and menu_edit names the active scope — so the neighbours are removed
+        # by FRAMING rather than by changing the scene.
         "shot": {"kind": "menu", "menu": menu_id, "cursor": "third",
-                 "ticks": MENU_TICKS},
+                 "view": HERO_VIEW, "overlays": CLEAN_OVERLAYS,
+                 "ticks": MENU_TICKS, "hud": _active_caption(menu_id)},
         "gated": gated,
         "doc": "see DOC_MAP.md",
     }
@@ -426,6 +479,13 @@ SCENARIOS = [
     # racy by the same rule as menu_visualize_point: it differed from its own
     # second pass under --selfcheck. Captured for the docs, never gated.
     _menu("menu_root", "ATTRVIZ_MT_root", gated=False),
+    # Blender's OWN object context menu — the actual thing RMB opens, with
+    # the AttrViz entry appended at the bottom. Every other menu shot starts
+    # below this level, because call_menu opens a menu as its own root.
+    # Needs the TALL window: Blender's object context menu is ~20 entries and
+    # clips at 900px, which hides the AttrViz row appended at its bottom.
+    _menu("menu_object_context", "VIEW3D_MT_object_context_menu",
+          gated=False, window=WIN_TALL),
     _menu("menu_edit", "ATTRVIZ_MT_edit"),
     _menu("menu_scope", "ATTRVIZ_MT_scope"),
     _menu("menu_domain_face", "ATTRVIZ_MT_domain_face"),
@@ -455,7 +515,8 @@ SCENARIOS = [
             ["VIZ_curv_surface", "VIZ_grad_arrows"]),
         "shot": {"kind": "viewport", "crop": "WINDOW", "view": HERO_VIEW,
                  "overlays": CLEAN_OVERLAYS, "ticks": VIEW_TICKS,
-                 "min_ink_px": 20000},
+                 "min_ink_px": 20000,
+                 "hud": _viz_caption("VIZ_curv_surface")},
         "gated": True,
         "doc": "README hero image",
     },
@@ -470,7 +531,8 @@ SCENARIOS = [
             "Suzanne_Measured", ["VIZ_grad_arrows"]),
         "shot": {"kind": "viewport", "crop": "WINDOW", "view": HERO_VIEW,
                  "overlays": CLEAN_OVERLAYS, "ticks": VIEW_TICKS,
-                 "min_ink_px": 2000},
+                 "min_ink_px": 2000,
+                 "hud": _viz_caption("VIZ_grad_arrows")},
         "gated": True,
         "doc": "README 'Visualization axes' — Arrows",
     },
@@ -485,7 +547,10 @@ SCENARIOS = [
         "assertions": assert_tableau,
         "shot": {"kind": "tableau", "crop": "WINDOW", "view": TABLEAU_VIEW,
                  "overlays": CLEAN_OVERLAYS, "ticks": VIEW_TICKS,
-                 "viz": "VIZ_grad_arrows", "min_cell_px": 500},
+                 "viz": "VIZ_grad_arrows", "min_cell_px": 500,
+                 # Display varies per cell, so it must not appear in a caption
+                 # that spans the whole tableau.
+                 "hud": _viz_caption("VIZ_grad_arrows", omit_display=True)},
         "gated": True,
         "doc": "README 'Visualization axes' — same attribute, every Type",
     },

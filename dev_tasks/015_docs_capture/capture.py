@@ -173,6 +173,31 @@ def compose_tableau(cell_paths, labels, gutter=6, label_scale=3, cols=None):
     return canvas, (rows, cols)
 
 
+def draw_hud(path, lines, scale=2, margin=18, leading=5, corner="bottom"):
+    """Stamp a caption into the image, right-aligned.
+
+    The lines are DERIVED from live state by the scenario, never typed here —
+    a hand-written caption is the same drift as a hand-written README figure,
+    except harder to notice because it is baked into a picture.
+
+    Right-hand side, because every menu and popup in these shots opens toward
+    the upper LEFT (the cursor sits a third across), so the right edge is the
+    reliably empty one.
+    """
+    frame, _size = load_rgba(path)
+    row_h = bitfont.GLYPH_H * scale
+    total = len(lines) * row_h + (len(lines) - 1) * leading
+    top = (margin if corner == "top"
+           else frame.shape[0] - margin - total)
+    for i, line in enumerate(lines):
+        width = (len(line) * (bitfont.GLYPH_W + 1) - 1) * scale
+        x = frame.shape[1] - margin - width
+        bitfont.draw_text(frame, line, x, top + i * (row_h + leading),
+                          scale=scale)
+    save_rgba(frame, path)
+    return list(lines)
+
+
 def apply_view(ctx, view):
     """C5: frame by explicit numbers, never by view_selected.
 
@@ -333,6 +358,11 @@ class Capture:
         canvas, grid = compose_tableau(self.cell_paths, self.steps, cols=cols)
         raw = os.path.join(OUT_DIR, self.scen["name"] + ".png")
         save_rgba(canvas, raw)
+        hud = self.shot.get("hud")
+        if hud:
+            report["hud"] = draw_hud(
+                raw, hud(self.ctx),
+                corner=self.shot.get("hud_corner", "bottom"))
         report["grid"] = list(grid)
         report["cells"] = list(self.steps)
 
@@ -409,6 +439,11 @@ class Capture:
             w, h = crop_to_region(raw, raw, region, self.ctx["area"])
             report["crop"] = [w, h]
         report["inset"] = inset_image(raw, INSET)
+        hud = self.shot.get("hud")
+        if hud:
+            report["hud"] = draw_hud(
+                raw, hud(self.ctx),
+                corner=self.shot.get("hud_corner", "bottom"))
         min_ink = self.shot.get("min_ink_px")
         if min_ink:
             ink = ink_pixels(raw)
