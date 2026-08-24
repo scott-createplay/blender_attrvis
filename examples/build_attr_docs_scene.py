@@ -203,6 +203,19 @@ def add_instancer(obj):
     return md
 
 
+def _scaled(builder, factor):
+    """Bake the scale into the MESH, not the object.
+
+    `wear` is computed from local position, so an object-level scale leaves
+    the attribute's range unchanged while the object looks smaller — which
+    quietly made the monkey a second outlier in a shot with exactly one.
+    """
+    def build(bm):
+        builder(bm)
+        bmesh.ops.scale(bm, vec=(factor, factor, factor), verts=bm.verts)
+    return build
+
+
 def torus(bm, major=0.85, minor=0.3, major_seg=28, minor_seg=14):
     """bmesh.ops has no create_torus, and the old fixture's 'Torus_Measured'
     was in fact a cone. Build a real one by spinning a circle."""
@@ -246,19 +259,32 @@ def main():
     add_measure(suzanne, scalar=True)
     add_face_ids(suzanne, name="face_id")
 
-    # The batch: six tiles on one shelf. Four ordinary, one worn well past the
-    # rest, one that never got the attribute at all.
+    # A prop shelf: six DIFFERENT objects that happen to share an attribute.
+    # Six copies of one primitive reads as a test fixture; a scope in real use
+    # is a heterogeneous set, and the visualizer cares about the attribute,
+    # not the shape.
+    props = [
+        ("Prop_Cube", lambda bm: bmesh.ops.create_cube(bm, size=0.84)),
+        ("Prop_Sphere", lambda bm: bmesh.ops.create_uvsphere(
+            bm, u_segments=20, v_segments=12, radius=0.44)),
+        ("Prop_Torus", lambda bm: torus(bm, major=0.30, minor=0.17,
+                                        major_seg=22, minor_seg=12)),
+        ("Prop_Cone", lambda bm: bmesh.ops.create_cone(
+            bm, cap_ends=True, cap_tris=False, segments=20,
+            radius1=0.44, radius2=0.0, depth=0.9)),
+        ("Prop_Cylinder", lambda bm: bmesh.ops.create_cone(
+            bm, cap_ends=True, cap_tris=False, segments=20,
+            radius1=0.34, radius2=0.34, depth=0.9)),
+        ("Prop_Monkey", _scaled(lambda bm: bmesh.ops.create_monkey(bm), 0.4)),
+    ]
     batch = []
-    for i in range(6):
-        obj = mesh_obj(f"Batch_{i + 1:02d}",
-                       lambda bm: bmesh.ops.create_icosphere(
-                           bm, subdivisions=2, radius=0.42),
-                       (-3.9 + i * 1.35, -3.6, 0.0))
+    for i, (name, builder) in enumerate(props):
+        obj = mesh_obj(name, builder, (-3.6 + i * 1.45, -3.8, 0.0))
         batch.append(obj)
-    for i, obj in enumerate(batch):
-        if i == 5:
-            continue          # Batch_06 carries nothing: the coverage story.
-        add_wear(obj, boost=2.4 if i == 3 else 1.0)
+    for obj in batch:
+        if obj.name == "Prop_Cone":
+            continue      # carries nothing: the coverage story
+        add_wear(obj, boost=2.4 if obj.name == "Prop_Torus" else 1.0)
     add_measure(torus_obj, scalar=False)
     add_face_ids(grid)
     add_instancer(cloud)
@@ -314,7 +340,7 @@ def main():
     print("=" * 70)
     print("SCENE BUILT — what a scenario should assert")
     print("=" * 70)
-    for obj in (suzanne, torus_obj, grid, bare, cloud) + tuple(batch[:1]):
+    for obj in (suzanne, torus_obj, grid, bare, cloud) + tuple(batch):
         by, _ = av.attributes_by_domain(obj)
         populated = {d: [n for n, _t in v] for d, v in by.items() if v}
         print(f"  {obj.name:18s} {populated or 'no attributes'}")

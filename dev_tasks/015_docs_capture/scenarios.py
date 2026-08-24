@@ -75,7 +75,8 @@ HERO_VIEW = {"location": (0.0, 0.0, 0.15), "rotation_deg": (72.0, 0.0, 32.0),
 # scene clutter, and a half-cropped one reads as a mistake. The
 # partial-coverage claim lives in the panel's counts (3 objects - 2 carry
 # grad), which is where a reader can actually check it.
-BATCH = tuple("Batch_%02d" % (i + 1) for i in range(6))
+BATCH = ("Prop_Cube", "Prop_Sphere", "Prop_Torus", "Prop_Cone",
+         "Prop_Cylinder", "Prop_Monkey")
 SOLO = (("Torus_Flow", "Grid_Plates", "Cylinder_Bare", "Instanced_Cloud")
         + BATCH)
 # Framed on the shelf of tiles, not on Suzanne.
@@ -121,6 +122,11 @@ def select_hero(ctx):
 
 def _viz(name):
     return bpy.data.objects[name]
+
+
+def av_mod(obj):
+    import attrviz as av
+    return av.viz_modifier(obj)
 
 
 def _hide(names):
@@ -308,10 +314,20 @@ def stage_color_heat(ctx):
 
 
 def stage_color_rgb(ctx):
-    """grad is a vector, so RGB maps its channels straight to colour."""
+    """grad is a vector, so it is drawn as ARROWS — direction is the question
+    a vector answers.
+
+    Arrows do not take a mapped colour: they carry their own `Arrow Color`
+    socket. Setting it off the default makes that control visible, and stops
+    a reader concluding arrows are always orange.
+    """
+    from attrviz import node_builder
     viz = _viz("VIZ_grad_arrows")
     viz.attrviz_style = "RGB"
-    viz.attrviz_display = "Surface"
+    viz.attrviz_display = "Arrows"
+    md = av_mod(viz)
+    node_builder.set_input(md, "Arrow Color", (0.24, 0.86, 1.0, 1.0))
+    node_builder.set_input(md, "Length", 0.13)
     return _only_viz(["VIZ_grad_arrows"])
 
 
@@ -403,6 +419,36 @@ def assert_result(ctx):
         raise AssertionError("the visualizer is collapsed; its settings are "
                              "the point of the shot")
     return {"visualizers": vizzes, "ui_width": ui.width}
+
+
+def stage_first_touch(ctx):
+    """The mesh BEFORE anything has been visualized.
+
+    This is the opening beat: the reader is about to create their first
+    visualizer, so the object must look untouched. Disabling the visualizers
+    is not enough — the fixture stores the display_type mute as an ID property,
+    so Suzanne would load as a bounds box with no ink and read as broken.
+    """
+    out = _make_active("Suzanne_Measured")
+    out.update(_only_viz([]))
+    out.update(_drop_from_scopes(SOLO))
+    out.update(_hide(SOLO))
+    out.update(_unmute("Suzanne_Measured"))
+    return out
+
+
+def assert_untouched(ctx):
+    """No ink, and the mesh in its ordinary display mode."""
+    on = [o.name for o in bpy.data.objects
+          if o.name.startswith("VIZ_") and getattr(o, "attrviz_enabled", False)]
+    if on:
+        raise AssertionError(f"expected nothing drawing, got {on}")
+    dt = bpy.data.objects["Suzanne_Measured"].display_type
+    if dt in ("BOUNDS", "WIRE"):
+        raise AssertionError(
+            f"Suzanne is {dt}; the opening shot must show the mesh as it "
+            "looks before AttrViz has touched it")
+    return assert_attrs_on_active(ctx)
 
 
 def stage_noop(ctx):
@@ -600,6 +646,30 @@ def assert_panel_ready(ctx):
 # --------------------------------------------------------------------------
 # the registry
 # --------------------------------------------------------------------------
+def _walk(name, path, doc):
+    """A menu shot reached the way a user reaches it.
+
+    Opening a submenu directly by bl_idname produces a detached popup with its
+    own title bar — a state nobody can get to. These walk the real chain, so
+    the reader sees the route as well as the contents.
+    """
+    return {
+        "name": name,
+        "blend": SCOPE_BLEND,
+        "window": (8, 8, 1900, 1250),
+        "prefs": MENU_PREFS,
+        "setup": select_hero,
+        "assertions": assert_attrs_on_active,
+        "shot": {"kind": "menu", "menu": "VIEW3D_MT_object_context_menu",
+                 "cursor": "highleft", "view": HERO_VIEW,
+                 "overlays": CLEAN_OVERLAYS, "ticks": WALK_TICKS,
+                 "hover_path": path, "hud": _active_caption()},
+        "gated": False,
+        "retries": 3,
+        "doc": doc,
+    }
+
+
 def _menu(name, menu_id, gated=True, window=None, hover=None,
           retries=0):
     return {
@@ -657,8 +727,8 @@ SCENARIOS = [
         # of menus side by side.
         "window": (8, 8, 1900, 1250),
         "prefs": MENU_PREFS,
-        "setup": select_hero,
-        "assertions": assert_attrs_on_active,
+        "setup": stage_first_touch,
+        "assertions": assert_untouched,
         "shot": {"kind": "menu", "menu": "VIEW3D_MT_object_context_menu",
                  "cursor": "highleft", "view": HERO_VIEW,
                  "overlays": CLEAN_OVERLAYS, "ticks": WALK_TICKS,
@@ -670,9 +740,16 @@ SCENARIOS = [
         "retries": 3,
         "doc": "README - the RMB path",
     },
-    _menu("menu_edit", "ATTRVIZ_MT_edit"),
+    # RMB -> AttrViz -> Edit.
+    _walk("menu_edit", ["last", 1],
+          "README - adding and removing objects"),
     _menu("menu_scope", "ATTRVIZ_MT_scope"),
-    _menu("menu_domain_face", "ATTRVIZ_MT_domain_face"),
+    # menu_domain_face is DELETED, not disabled. Reaching Face means hovering
+    # down past Point while Point's submenu is open, which is the safety
+    # triangle — measured at 2 failures in 3. The breadcrumb already shows the
+    # domain list (and that a plain mesh gets no Instance row), and
+    # strip_domains shows Face against Point on one object, so nothing is
+    # lost by not shipping a figure that builds one time in three.
     {
         # The un-realized instances guidance: no test, no doc, and only
         # reachable on an object whose mesh domains are empty.
@@ -802,9 +879,9 @@ SCENARIOS = [
         "shot": {"kind": "filmstrip", "view": HERO_VIEW,
                  "overlays": CLEAN_OVERLAYS, "ticks": VIEW_TICKS,
                  "min_cell_px": 500,
-                 "stages": [("HEAT  CURV  FLOAT", stage_color_heat),
-                            ("RGB  GRAD  VECTOR", stage_color_rgb),
-                            ("RANDOM  FACE ID  INT", stage_color_random)]},
+                 "stages": [("CURV  FLOAT  HEAT", stage_color_heat),
+                            ("GRAD  VECTOR  ARROWS", stage_color_rgb),
+                            ("FACE ID  INT  RANDOM", stage_color_random)]},
         "gated": True,
         "doc": "README - Colour follows the data type",
     },

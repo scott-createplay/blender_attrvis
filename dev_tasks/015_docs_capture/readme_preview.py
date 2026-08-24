@@ -16,7 +16,9 @@ import re
 
 REPO = r"c:/Users/scooter/dev/__projects__/blender_attrviz"
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(HERE, "attrviz_ui_tour.html")
+import sys
+OUT = (sys.argv[1] if len(sys.argv) > 1
+       else os.path.join(HERE, "attrviz_ui_tour.html"))
 
 
 def data_uri(rel):

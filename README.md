@@ -104,7 +104,9 @@ Colour follows the **data type**; it isn't a free choice:
 
 ![heat, rgb and random](docs/img/strip_colors.png)
 
-*`curv` (float) as Heat, `grad` (vector) as RGB, `face_id` (int) as Random.*
+*`curv` (float) as a Heat surface, `grad` (vector) as Arrows, `face_id` (int)
+as Random. Arrows carry their own colour rather than a mapped one — the cyan
+here is a setting, not a default.*
 
 ### Type — how it's drawn
 
@@ -114,7 +116,8 @@ are independent.
 - **Markers** — a point per element. Where things are, and how many.
 - **Surface** — false colour across the mesh. The gradient over a whole form.
 - **Arrows** — cones along a vector. Direction and relative magnitude.
-  **Needs a vector.**
+  **Needs a vector.** Their colour is a per-visualizer setting rather than a
+  mapped one.
 - **Tags** — the value printed as text at the element, for reading an actual
   number off one. Capped, so it stays legible.
 
@@ -146,8 +149,22 @@ tree didn't run.
 
 ![six objects on one shared ramp](docs/img/viewport_scope_compare.png)
 
-*One visualizer over six objects. The fourth is plainly hot; the sixth is grey
-because it never got the attribute.*
+*One visualizer over six unrelated objects. The torus is plainly hot; the cone
+is grey because it never got the attribute.*
+
+### Why you'd want more than one
+
+Scopes are how you ask **several questions at once**. Wear on the props,
+curvature on the terrain, plate ids on the panels — three collections, three
+visualizers, all drawing together, each with its own attribute, type and range.
+
+It also lets the **same attribute carry two appearances at the same time**:
+auto-ranged on one collection so you can see relative variation, fixed-range on
+another so you can compare against an absolute threshold. Both visible, in the
+same viewport.
+
+That's why the panel is a tree rather than a list — each branch is a separate
+question you've asked of the scene.
 
 ---
 
@@ -182,11 +199,9 @@ to inspect and nothing to have anticipated. Point a visualizer at it and look.
 ### The right-click menu
 
 Domain-first. Each submenu shows only what exists on that domain, with its type
-and the Colour / Type pair it will create.
-
-![the Face submenu](docs/img/menu_domain_face.png)
-
-*Face carries `face_id` and `sharp_face`; Point does not.*
+and the Colour / Type pair it will create — so switching from Point to Face
+changes the list, and a plain mesh is never offered an Instance domain it
+doesn't have.
 
 ### The Viz panel
 
@@ -208,14 +223,15 @@ Visualizers group under the collection each one watches.
 Adding is **additive**: an object stays in every collection it already belongs
 to. Scopes are flat unless you nest them yourself in the outliner.
 
-![the Active Scope menu](docs/img/menu_scope.png)
-
-*Every collection with its live count, and a filled radio on the active one.*
-
 ![the Edit menu](docs/img/menu_edit.png)
 
-*The labels name the destination, because with several scopes "Add objects"
-alone doesn't say where.*
+*`RMB → AttrViz → Edit`. The labels name the destination, because with several
+scopes "Add objects" alone doesn't say where.*
+
+The **Scope** dropdown at the top of the Viz panel switches which collection is
+active — it lists every scope with its live object count, and a filled radio on
+the current one. **New collection from selection…** makes a fresh scope out of
+whatever you have selected.
 
 ---
 
