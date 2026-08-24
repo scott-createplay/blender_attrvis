@@ -462,6 +462,73 @@ def stage_point_markers(ctx):
     return out
 
 
+def stage_mesh_keep(ctx):
+    """Control: the SAME graph with Mesh to Points bypassed, so the object
+    stays a mesh. If markers draw here and not there, the point cloud is the
+    variable and nothing else about the scene is."""
+    out = stage_mesh_to_points(ctx)
+    ng = bpy.data.node_groups["MeshToPoints"]
+    st = next(n for n in ng.nodes
+              if n.bl_idname == "GeometryNodeStoreNamedAttribute")
+    gin = next(n for n in ng.nodes if n.bl_idname == "NodeGroupInput")
+    for link in list(ng.links):
+        if link.to_node == st and link.to_socket.name == "Geometry":
+            ng.links.remove(link)
+    ng.links.new(gin.outputs[0], st.inputs["Geometry"])
+    bpy.context.view_layer.update()
+    out["bypassed"] = "MeshToPoints"
+    return out
+
+
+def stage_mesh_to_points(ctx):
+    """Build the reported scene from scratch: UV sphere -> Mesh to Points ->
+    a named attribute, then visualize it as Markers."""
+    import bmesh
+    import attrviz as av
+    for obj in list(bpy.data.objects):
+        bpy.data.objects.remove(obj, do_unlink=True)
+
+    me = bpy.data.meshes.new("Sphere")
+    bm = bmesh.new()
+    bmesh.ops.create_uvsphere(bm, u_segments=24, v_segments=12, radius=1.0)
+    bm.to_mesh(me)
+    bm.free()
+    obj = bpy.data.objects.new("Sphere", me)
+    bpy.context.scene.collection.objects.link(obj)
+
+    ng = bpy.data.node_groups.new("MeshToPoints", 'GeometryNodeTree')
+    ng.interface.new_socket("Geometry", in_out='INPUT',
+                            socket_type='NodeSocketGeometry')
+    ng.interface.new_socket("Geometry", in_out='OUTPUT',
+                            socket_type='NodeSocketGeometry')
+    gin = ng.nodes.new("NodeGroupInput")
+    gout = ng.nodes.new("NodeGroupOutput")
+    m2p = ng.nodes.new("GeometryNodeMeshToPoints")
+    pos = ng.nodes.new("GeometryNodeInputPosition")
+    st = ng.nodes.new("GeometryNodeStoreNamedAttribute")
+    st.data_type = 'FLOAT_VECTOR'
+    st.domain = 'POINT'
+    st.inputs["Name"].default_value = "Cd"
+    ng.links.new(gin.outputs[0], m2p.inputs["Mesh"])
+    ng.links.new(m2p.outputs["Points"], st.inputs["Geometry"])
+    ng.links.new(pos.outputs["Position"], st.inputs["Value"])
+    ng.links.new(st.outputs["Geometry"], gout.inputs[0])
+    md = obj.modifiers.new("GN", 'NODES')
+    md.node_group = ng
+    bpy.context.view_layer.update()
+
+    scope = av.active_scope(bpy.context, create=True)
+    av._link_to_watch(bpy.context, [obj], scope)
+    viz = av.add_visualizer(bpy.context, scope=scope, attribute="Cd",
+                            domain="Point", style="RGB", display="Markers")
+    viz.name = "VIZ_cd_markers"
+    bpy.context.view_layer.update()
+    for o in bpy.context.view_layer.objects:
+        o.select_set(False)
+    bpy.context.view_layer.objects.active = None
+    return {"object": obj.name, "viz": viz.name}
+
+
 def stage_noop(ctx):
     """A filmstrip's stages do their own staging.
 
@@ -927,6 +994,38 @@ SCENARIOS = [
                  "hud": _viz_caption("VIZ_curv_surface")},
         "gated": False,
         "doc": "diagnostic - Point + Markers",
+    },
+    {
+        # Control for the above: same graph, mesh preserved.
+        "name": "probe_mesh_control",
+        "blend": SCOPE_BLEND,
+        "window": (60, 60, 1200, 760),
+        "prefs": PANEL_PREFS,
+        "setup": stage_mesh_keep,
+        "assertions": lambda ctx: {},
+        "shot": {"kind": "viewport", "crop": "WINDOW",
+                 "view": {"location": (0.0, 0.0, 0.0),
+                          "rotation_deg": (70.0, 0.0, 30.0),
+                          "distance": 5.0},
+                 "overlays": CLEAN_OVERLAYS, "ticks": VIEW_TICKS},
+        "gated": False,
+        "doc": "diagnostic - control, mesh preserved",
+    },
+    {
+        # Reported case: Mesh to Points + a named attribute. Diagnostic.
+        "name": "probe_mesh_to_points",
+        "blend": SCOPE_BLEND,
+        "window": (60, 60, 1200, 760),
+        "prefs": PANEL_PREFS,
+        "setup": stage_mesh_to_points,
+        "assertions": lambda ctx: {},
+        "shot": {"kind": "viewport", "crop": "WINDOW",
+                 "view": {"location": (0.0, 0.0, 0.0),
+                          "rotation_deg": (70.0, 0.0, 30.0),
+                          "distance": 5.0},
+                 "overlays": CLEAN_OVERLAYS, "ticks": VIEW_TICKS},
+        "gated": False,
+        "doc": "diagnostic - Mesh to Points",
     },
     {
         # Not our panel. The contrast is the point.
