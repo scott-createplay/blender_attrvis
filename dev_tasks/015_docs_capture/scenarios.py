@@ -451,6 +451,17 @@ def assert_untouched(ctx):
     return assert_attrs_on_active(ctx)
 
 
+def stage_point_markers(ctx):
+    """curv (float) on Point, drawn as Markers, coloured by Heat."""
+    out = _solo_suzanne()
+    out.update(_only_viz(["VIZ_curv_surface"]))
+    viz = _viz("VIZ_curv_surface")
+    viz.attrviz_style = "Heat"
+    viz.attrviz_display = "Markers"
+    out.update(_unmute("Suzanne_Measured"))
+    return out
+
+
 def stage_noop(ctx):
     """A filmstrip's stages do their own staging.
 
@@ -899,6 +910,23 @@ SCENARIOS = [
         # which is better evidence than a caption repeating it.
         "gated": True,
         "doc": "README - the result of the click",
+    },
+    {
+        # Diagnostic, not a doc figure: a scalar on Point drawn as Markers
+        # should be a GRADIENT of coloured dots. Flat colour means the value
+        # is not reaching the marker shader.
+        "name": "probe_point_markers",
+        "blend": SCOPE_BLEND,
+        "window": (60, 60, 1200, 760),
+        "prefs": PANEL_PREFS,
+        "setup": stage_point_markers,
+        "assertions": assert_two_scopes_atleast,
+        "shot": {"kind": "viewport", "crop": "WINDOW", "view": HERO_VIEW,
+                 "overlays": CLEAN_OVERLAYS, "ticks": VIEW_TICKS,
+                 "min_ink_px": 200,
+                 "hud": _viz_caption("VIZ_curv_surface")},
+        "gated": False,
+        "doc": "diagnostic - Point + Markers",
     },
     {
         # Not our panel. The contrast is the point.
