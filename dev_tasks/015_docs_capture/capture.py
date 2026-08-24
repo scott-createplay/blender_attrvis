@@ -46,6 +46,9 @@ OUT_DIR = os.environ.get("ATTRVIZ_OUT", os.path.join(HERE, "out", "stage1"))
 SETTLE_EVERY = 3
 SETTLE_NEEDED = 2
 SETTLE_MAX_POLLS = 40
+# Ticks allowed per rung of a menu walk: warp, three re-nudges, then room for
+# the submenu to animate open before the next rung is located.
+WALK_STEP_TICKS = 18
 
 # Blender draws a 1px outline around the editor area, and its colour depends on
 # which area is active at capture time — the ONLY thing that differed between
@@ -266,7 +269,27 @@ class Capture:
             self.pending_set = True
             self.pre_hash = None
         area = ctx["area"]
-        if self.shot.get("cursor") == "center":
+        self.walk_prev = None
+        self.walk_right = None
+        if self.shot.get("cursor") == "highleft":
+            # Four menus grow rightward off one row. Start well left, or
+            # Blender runs out of room and flips a submenu back to the left,
+            # which scrambles the reading order of the breadcrumb.
+            self.cx = area.x + area.width // 9
+            self.cy = area.y + area.height - 70
+        elif self.shot.get("cursor") == "high":
+            # A long context menu hangs DOWN from the cursor, and its
+            # submenus open from whichever row is hovered. Opening near the
+            # top leaves the AttrViz row high enough that the cascade below it
+            # is not reflowed against the window edge.
+            self.cx = area.x + area.width // 3
+            self.cy = area.y + area.height - 70
+        elif self.shot.get("cursor") == "left":
+            # A cascade grows right and down: start near the top-left so four
+            # menus have somewhere to go.
+            self.cx = area.x + 40
+            self.cy = area.y + area.height - 90
+        elif self.shot.get("cursor") == "center":
             self.cx = area.x + area.width // 2
             self.cy = area.y + area.height // 2
         else:  # "third" — opens left of centre so a cascade stays in the area
@@ -283,6 +306,121 @@ class Capture:
         with self._override():
             res = bpy.ops.wm.call_menu(name=self.shot["menu"])
         report["call_menu"] = list(res)
+
+    def probe_shot(self, tag):
+        path = os.path.join(OUT_DIR, f"_{tag}_{self.scen['name']}.png")
+        with self._override():
+            bpy.ops.screen.screenshot_area(filepath=path)
+        return path
+
+    def _diff_bbox(self, prev_path, cur_path, min_x=None):
+        """Where did new ink appear between these two frames?
+
+        Restricting to x > min_x isolates the submenu that just opened from
+        the parent row's highlight changing at the same moment.
+        """
+        a, _sa = load_rgba(prev_path)
+        b, _sb = load_rgba(cur_path)
+        mask = (np.abs(a[:, :, :3] - b[:, :, :3]) > 0.02).any(axis=2)
+        if min_x:
+            mask[:, :min_x] = False
+        if not mask.any():
+            raise RuntimeError("no new menu appeared to hover")
+        ys, xs = np.nonzero(mask)
+        return int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
+
+    def hover_step(self, index):
+        """Hover one rung of the cascade.
+
+        Every menu is located by diffing against the frame before it opened —
+        never by counting rows or hardcoding pixels, so the walk survives
+        Blender or AttrViz changing what is in these menus.
+        """
+        sel = self.shot["hover_path"][index]
+        cur = self.probe_shot(f"walk{index}")
+        x0, y0, _x1, y1 = self._diff_bbox(
+            self.walk_prev, cur,
+            min_x=(self.walk_right + 6) if self.walk_right else None)
+        if sel == "last":
+            img_y = y0 + int(self.pitch * 0.8)
+        else:
+            # Rows run downward from the top edge; submenus have no title row.
+            img_y = y1 - int((sel + 0.5) * self.pitch)
+        area = self.ctx["area"]
+        target = (area.x + x0 + int(self.pitch * 1.6), area.y + img_y)
+        self.hover_target = target
+        self.ctx["window"].cursor_warp(*target)
+        self.walk_prev = cur
+        self.walk_right = _x1
+        report.setdefault("walk", []).append(
+            {"step": index, "select": sel, "cursor": list(target),
+             "bbox": [x0, y0, _x1, y1]})
+        print(f"[capture] walk {index} -> {sel} at {target}")
+
+    def hover_last_row(self):
+        """Put the highlight on the LAST entry of an open menu.
+
+        A menu opens with its FIRST row under the cursor, which is why the
+        object context menu photographs with "Shade Smooth" highlighted. The
+        row we want is AttrViz, at the bottom.
+
+        The row's position is derived, not guessed: diff the open menu against
+        the frame before it opened, and the changed-pixel bbox IS the menu
+        rect. Its lower edge plus half a row is the last entry.
+
+        Steering was racy when the highlighted row had a submenu already open
+        (Blender holds the parent while the cursor moves toward it). The first
+        row here has no submenu, so there is no safety triangle to fight.
+        """
+        base, (_bw, bh) = load_rgba(self.base_before)
+        cur, _size = load_rgba(self.probe_shot("menuprobe"))
+        mask = (np.abs(base[:, :, :3] - cur[:, :, :3]) > 0.02).any(axis=2)
+        if not mask.any():
+            raise RuntimeError("menu did not draw; cannot locate its rows")
+        ys, xs = np.nonzero(mask)
+        # Image rows are bottom-up, so ys.min() is the menu's LOWER edge.
+        bottom_img = int(ys.min())
+        left_img = int(xs.min())
+        area = self.ctx["area"]
+        y = area.y + bottom_img + int(self.pitch * 0.55)
+        x = area.x + left_img + int(self.pitch * 1.5)
+        self.hover_target = (x, y)
+        self.ctx["window"].cursor_warp(x, y)
+        report["hover_last_row"] = {"menu_bbox_img": [left_img, bottom_img],
+                                    "cursor": [x, y]}
+        print(f"[capture] hover last row at ({x}, {y})")
+
+    def walk_tick(self, t, plan):
+        """Schedule the walk: one step, then re-nudges, then the next step.
+
+        The re-nudges matter as much here as they did for the single hover —
+        the first warp lands while the submenu is still animating open, and a
+        cursor that stops moving never asks Blender to re-evaluate the row.
+        """
+        span = WALK_STEP_TICKS
+        start = plan["open"] + 4
+        for k in range(len(self.shot["hover_path"])):
+            base = start + k * span
+            if t == base:
+                self.hover_step(k)
+                return
+            if t in (base + 2, base + 4, base + 6, base + 8, base + 10):
+                self.renudge(t)
+                return
+
+    def renudge(self, index):
+        """Re-warp with a pixel of jitter.
+
+        One warp is not enough: the menu is still animating open when the
+        first move lands, and afterwards a stationary cursor at a new position
+        never produces another motion event — so Blender keeps the row it
+        highlighted at open time. The same lesson as the tableau: a state
+        change needs a fresh event, not just a new value.
+        """
+        if not getattr(self, "hover_target", None):
+            return
+        x, y = self.hover_target
+        self.ctx["window"].cursor_warp(x + (index % 2), y)
 
     def nudge(self, index):
         jitter = 1 if index % 2 else 0
@@ -471,8 +609,19 @@ class Capture:
             elif "reveal" in plan and t == plan["reveal"]:
                 report["assertions"].update(
                     self.scen["setup"](self.ctx) or {})
+            elif "open" in plan and t == plan["open"] - 1:
+                # The frame before the menu exists, so its rect can be found.
+                self.base_before = self.probe_shot("premenu")
+                self.walk_prev = self.base_before
             elif "open" in plan and t == plan["open"]:
                 self.open_menu()
+            elif self.shot.get("hover") == "last" and                     t == plan["open"] + 4:
+                self.hover_last_row()
+            elif self.shot.get("hover") == "last" and                     t in (plan["open"] + 7, plan["open"] + 9,
+                          plan["open"] + 11):
+                self.renudge(t)
+            elif self.shot.get("hover_path") and t < plan["shot"]:
+                self.walk_tick(t, plan)
             elif t in plan.get("nudges", ()):
                 self.nudge(plan["nudges"].index(t))
             elif t >= plan["shot"] and self.shot["kind"] in (

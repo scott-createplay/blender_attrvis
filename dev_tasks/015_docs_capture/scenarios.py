@@ -32,6 +32,8 @@ MENU_TICKS = {"warmup": 14, "open": 15, "nudges": (17, 19, 21, 23), "shot": 31}
 # probe_menu's plan — earlier shutter, no nudges, and NO preference changes.
 CASCADE_TICKS = {"warmup": 12, "open": 13, "nudges": (), "shot": 27}
 PANEL_TICKS = {"warmup": 16, "reveal": 17, "shot": 27}
+# Three rungs at 12 ticks each, then room to settle.
+WALK_TICKS = {"warmup": 14, "open": 15, "nudges": (), "shot": 86}
 # No menu to open; the settle loop decides when the overlay has finished.
 VIEW_TICKS = {"warmup": 10, "shot": 12}
 
@@ -239,12 +241,11 @@ def _viz_caption(viz_name, omit_display=False):
         dtype = "/".join(sorted(dtypes)) if dtypes else "?"
         scope = av.viz_scope(md)
         head = f"{attr}  {domain}" if omit_display else             f"{attr}  {domain}  {display}"
-        return [_clean(head),
-                _clean(f"{dtype}  scope {getattr(scope, 'name', 'none')}")]
+        return [_clean(head)]
     return hud
 
 
-def _active_caption(extra=""):
+def _active_caption(extra="", _unused=None):
     """For menu shots: which object's attributes are being listed.
 
     The menu itself never says. With several objects in the scene a reader
@@ -253,10 +254,7 @@ def _active_caption(extra=""):
     """
     def hud(ctx):
         obj = bpy.context.view_layer.objects.active
-        lines = [_clean(f"active  {obj.name if obj else 'none'}")]
-        if extra:
-            lines.append(_clean(extra))
-        return lines
+        return [_clean(obj.name if obj else "none")]
     return hud
 
 
@@ -443,7 +441,7 @@ def assert_panel_ready(ctx):
 # --------------------------------------------------------------------------
 # the registry
 # --------------------------------------------------------------------------
-def _menu(name, menu_id, gated=True, window=None):
+def _menu(name, menu_id, gated=True, window=None, hover=None):
     return {
         "name": name,
         "blend": SCOPE_BLEND,
@@ -457,7 +455,8 @@ def _menu(name, menu_id, gated=True, window=None):
         # by FRAMING rather than by changing the scene.
         "shot": {"kind": "menu", "menu": menu_id, "cursor": "third",
                  "view": HERO_VIEW, "overlays": CLEAN_OVERLAYS,
-                 "ticks": MENU_TICKS, "hud": _active_caption(menu_id)},
+                 "ticks": MENU_TICKS, "hud": _active_caption(),
+                 "hover": hover},
         "gated": gated,
         "doc": "see DOC_MAP.md",
     }
@@ -485,7 +484,28 @@ SCENARIOS = [
     # Needs the TALL window: Blender's object context menu is ~20 entries and
     # clips at 900px, which hides the AttrViz row appended at its bottom.
     _menu("menu_object_context", "VIEW3D_MT_object_context_menu",
-          gated=False, window=WIN_TALL),
+          gated=False, window=WIN_TALL, hover="last"),
+    {
+        # The whole path in one image: RMB -> AttrViz -> Visualize Attribute
+        # -> Point -> the attributes. Every rung is located by diffing for the
+        # menu that just appeared, so nothing here counts rows or hardcodes
+        # pixels.
+        "name": "menu_breadcrumb",
+        "blend": SCOPE_BLEND,
+        # As wide as the display allows: the full chain is roughly 1150px
+        # of menus side by side.
+        "window": (8, 8, 1900, 1250),
+        "prefs": MENU_PREFS,
+        "setup": select_hero,
+        "assertions": assert_attrs_on_active,
+        "shot": {"kind": "menu", "menu": "VIEW3D_MT_object_context_menu",
+                 "cursor": "highleft", "view": HERO_VIEW,
+                 "overlays": CLEAN_OVERLAYS, "ticks": WALK_TICKS,
+                 "hover_path": ["last", 0, 0],
+                 "hud": _active_caption()},
+        "gated": False,
+        "doc": "README - the RMB path",
+    },
     _menu("menu_edit", "ATTRVIZ_MT_edit"),
     _menu("menu_scope", "ATTRVIZ_MT_scope"),
     _menu("menu_domain_face", "ATTRVIZ_MT_domain_face"),
