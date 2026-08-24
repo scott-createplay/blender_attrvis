@@ -526,7 +526,18 @@ def stage_mesh_to_points(ctx):
     for o in bpy.context.view_layer.objects:
         o.select_set(False)
     bpy.context.view_layer.objects.active = None
-    return {"object": obj.name, "viz": viz.name}
+    # Does the overlay's own mute sync run, and does it reach this object?
+    from attrviz import gpu_overlay
+    gpu_overlay._sync_surface_target_mute(bpy.context.scene)
+    comp = gpu_sample_component(obj)
+    return {"object": obj.name, "viz": viz.name,
+            "evaluated_component": comp,
+            "display_type_after_sync": obj.display_type}
+
+
+def gpu_sample_component(obj):
+    from attrviz import gpu_sample
+    return gpu_sample.evaluated_component(obj)
 
 
 def stage_noop(ctx):

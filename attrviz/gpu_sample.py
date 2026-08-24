@@ -769,13 +769,58 @@ def watch_fingerprint(md) -> tuple:
     return (_scene_epoch, tuple(parts))
 
 
+def evaluated_component(obj, dg=None) -> str:
+    """What the object EVALUATES to: 'MESH', 'POINTCLOUD', or ''.
+
+    ``obj.type`` answers what the object *is*, which is a different question.
+    A mesh carrying a Mesh to Points modifier is type MESH and evaluates to a
+    point cloud, so any decision about what to draw on it — or what to mute
+    underneath it — has to ask the modifier stack, not the datablock.
+    """
+    try:
+        if dg is None:
+            # Callers outside a handler (the panel, tests) can afford this.
+            # Handler callers pass their own dg precisely so this never runs
+            # once per watched object.
+            dg = bpy.context.evaluated_depsgraph_get()
+        ev = obj.evaluated_get(dg) if dg is not None else obj
+        data = getattr(ev, "data", None)
+        if _geom_has_verts(data):
+            return "MESH"
+        if _geom_has_points(data):
+            return "POINTCLOUD"
+        # Only now is the geometry set worth reading. Doing it unconditionally
+        # -- or worse, calling evaluated_depsgraph_get() per object as
+        # _evaluated_source does -- runs inside a depsgraph handler and stalls
+        # the UI hard enough to drop cursor events.
+        gs = ev.evaluated_geometry()
+        if _geom_has_verts(getattr(gs, "mesh", None)):
+            return "MESH"
+        if _geom_has_points(getattr(gs, "pointcloud", None)):
+            return "POINTCLOUD"
+    except Exception:
+        return getattr(obj, "type", "")
+    return ""
+
+
 def watch_has_faces(md) -> bool:
-    """True if any watched object has polygons (unevaluated mesh data)."""
+    """True if any watched object EVALUATES to geometry with polygons.
+
+    Reading obj.data.polygons answered for the original mesh, so a sphere
+    with a Mesh to Points modifier claimed faces it no longer has.
+    """
+    try:
+        dg = bpy.context.evaluated_depsgraph_get()
+    except Exception:
+        dg = None
     for obj in watch_meshes_for_visualizer(md):
-        data = getattr(obj, "data", None)
-        polys = getattr(data, "polygons", None)
-        if polys is not None and len(polys) > 0:
-            return True
+        try:
+            ev = obj.evaluated_get(dg) if dg is not None else obj
+            polys = getattr(getattr(ev, "data", None), "polygons", None)
+            if polys is not None and len(polys) > 0:
+                return True
+        except Exception:
+            continue
     return False
 
 

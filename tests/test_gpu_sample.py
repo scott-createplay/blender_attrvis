@@ -1489,6 +1489,78 @@ check("009 only lowercase 'position' is aliased onto an intrinsic",
       node_builder.INTRINSIC_ALIASES == frozenset({"position"}),
       str(node_builder.INTRINSIC_ALIASES))
 
+# ---------------------------------------------------------------------------
+print("")
+print("== 016: a MESH that EVALUATES to a point cloud ==")
+# The 006 cases use a NATIVE PointCloud object. A mesh carrying Mesh to Points
+# is type MESH and evaluates to a cloud -- a different shape of the same case,
+# and the one that shipped broken: nothing drew but Tags, because the
+# decisions were made from obj.type / obj.data instead of evaluated geometry.
+
+_m2p_me = bpy.data.meshes.new("M2P")
+_bm2 = _bm.new()
+_bm.ops.create_uvsphere(_bm2, u_segments=8, v_segments=6, radius=1.0)
+_bm2.to_mesh(_m2p_me)
+_bm2.free()
+_m2p_obj = bpy.data.objects.new("M2P", _m2p_me)
+bpy.context.scene.collection.objects.link(_m2p_obj)
+
+_m2p_ng = bpy.data.node_groups.new("M2P_tree", 'GeometryNodeTree')
+_m2p_ng.interface.new_socket("Geometry", in_out='INPUT',
+                             socket_type='NodeSocketGeometry')
+_m2p_ng.interface.new_socket("Geometry", in_out='OUTPUT',
+                             socket_type='NodeSocketGeometry')
+_gi = _m2p_ng.nodes.new("NodeGroupInput")
+_go = _m2p_ng.nodes.new("NodeGroupOutput")
+_m2pn = _m2p_ng.nodes.new("GeometryNodeMeshToPoints")
+_posn = _m2p_ng.nodes.new("GeometryNodeInputPosition")
+_stn = _m2p_ng.nodes.new("GeometryNodeStoreNamedAttribute")
+_stn.data_type = 'FLOAT_VECTOR'
+_stn.domain = 'POINT'
+_stn.inputs["Name"].default_value = "Cd"
+_m2p_ng.links.new(_gi.outputs[0], _m2pn.inputs["Mesh"])
+_m2p_ng.links.new(_m2pn.outputs["Points"], _stn.inputs["Geometry"])
+_m2p_ng.links.new(_posn.outputs["Position"], _stn.inputs["Value"])
+_m2p_ng.links.new(_stn.outputs["Geometry"], _go.inputs[0])
+_m2p_md = _m2p_obj.modifiers.new("GN", 'NODES')
+_m2p_md.node_group = _m2p_ng
+bpy.context.view_layer.update()
+
+check("016 object type is still MESH", _m2p_obj.type == "MESH", _m2p_obj.type)
+check("016 evaluated_component says POINTCLOUD",
+      gpu_sample.evaluated_component(_m2p_obj) == "POINTCLOUD",
+      gpu_sample.evaluated_component(_m2p_obj))
+
+# A scope of its OWN: watch_has_faces answers for every watched object, and
+# the default scope already holds meshes from the cases above.
+_m2p_scope = av.new_scope_collection(bpy.context, "m2p_only")
+av._link_to_watch(bpy.context, [_m2p_obj], _m2p_scope)
+_m2p_viz = av.add_visualizer(bpy.context, scope=_m2p_scope, attribute="Cd",
+                             domain="Point", style="RGB", display="Markers")
+bpy.context.view_layer.update()
+_m2p_vmd = av.viz_modifier(_m2p_viz)
+
+check("016 watch_has_faces False (the cloud has none)",
+      gpu_sample.watch_has_faces(_m2p_vmd) is False,
+      str(gpu_sample.watch_has_faces(_m2p_vmd)))
+
+_m2p_names = gpu_overlay._eval_attr_names(
+    _m2p_obj, bpy.context.evaluated_depsgraph_get())
+check("016 the cloud attribute is visible to the mute probe",
+      _m2p_names is not None and "Cd" in _m2p_names.get("Point", {}),
+      str(None if _m2p_names is None else sorted(_m2p_names.get("Point", {}))))
+check("016 Normal withheld (a cloud has no vertices)",
+      _m2p_names is not None
+      and node_builder.NORMAL_ATTR not in _m2p_names.get("Point", {}),
+      str(None if _m2p_names is None else sorted(_m2p_names.get("Point", {}))))
+
+_m2p_res = gpu_sample.sample_visualizer_targets(_m2p_vmd)
+check("016 the sampler returns the cloud points",
+      _m2p_res is not None and gpu_sample.buffer_stats(_m2p_res)["n"] > 0,
+      str(None if _m2p_res is None
+          else gpu_sample.buffer_stats(_m2p_res)["n"]))
+
+
 print(f"\n== Result: {PASS} passed, {FAIL} failed ==")
 if FAIL:
     sys.exit(1)

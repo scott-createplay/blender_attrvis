@@ -252,16 +252,35 @@ def _eval_attr_names(obj, dg):
     try:
         ev = obj.evaluated_get(dg) if dg is not None else obj
         data = getattr(ev, "data", None)
+        sources = []
         attrs = getattr(data, "attributes", None)
-        if attrs is None:
+        if attrs is not None:
+            sources.append(attrs)
+        # An object that evaluates to a point cloud has an EMPTY ev.data --
+        # the cloud lives only on the geometry set. Consult it, but only when
+        # the cheap read came up empty: this runs from a depsgraph handler on
+        # every update, and calling evaluated_geometry() for every ordinary
+        # mesh was slow enough to stall the UI.
+        verts = getattr(data, "vertices", None)
+        if verts is None or len(verts) == 0:
+            try:
+                gs = ev.evaluated_geometry()
+                pc_attrs = getattr(getattr(gs, "pointcloud", None),
+                                   "attributes", None)
+                if pc_attrs is not None:
+                    sources.append(pc_attrs)
+            except Exception:
+                pass
+        if not sources:
             return None
         by = {d: {} for d in node_builder.UI_DOMAINS}
         b2ui = {v: k for k, v in node_builder.DOMAIN_TO_BLENDER.items()}
-        for a in attrs:
-            ui = b2ui.get(getattr(a, "domain", None))
-            if ui is not None:
-                by[ui][a.name] = getattr(a, "data_type", None)
-        has_verts = hasattr(data, "vertices")
+        for attr_src in sources:
+            for a in attr_src:
+                ui = b2ui.get(getattr(a, "domain", None))
+                if ui is not None:
+                    by[ui][a.name] = getattr(a, "data_type", None)
+        has_verts = hasattr(data, "vertices") and len(data.vertices) > 0
         for name, dtype, domains in node_builder.INTRINSICS:
             if name == node_builder.NORMAL_ATTR and not has_verts:
                 continue
@@ -397,9 +416,25 @@ def _active_watch_targets(scene, kind_name, blender_type, *,
     out = []
     seen = set()
     attr_cache = {}
+    # One classification per object, not one per visualizer. Five visualizers
+    # over the same watch set meant five evaluated_get calls per object on
+    # every depsgraph update, which is enough to stall the UI.
+    comp_cache = {}
     for md in kind_mds:
         for obj in gpu_sample.watch_meshes_for_visualizer(md):
-            if obj is None or obj.type != blender_type:
+            if obj is None:
+                continue
+            # By EVALUATED geometry, not obj.type. A mesh with a Mesh to
+            # Points modifier is type MESH and evaluates to a point cloud;
+            # selecting on obj.type left Blender's own point spheres drawn at
+            # exactly the marker centres, and the overlay lost the depth test
+            # to them — the ink was there and invisible.
+            ckey = obj.as_pointer()
+            comp = comp_cache.get(ckey)
+            if comp is None:
+                comp = gpu_sample.evaluated_component(obj, dg)
+                comp_cache[ckey] = comp
+            if comp != blender_type:
                 continue
             key = obj.as_pointer()
             if key in seen:
