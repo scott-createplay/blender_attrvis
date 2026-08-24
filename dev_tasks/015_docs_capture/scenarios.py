@@ -61,8 +61,13 @@ HERO_VIEW = {"location": (0.0, 0.0, 0.15), "rotation_deg": (72.0, 0.0, 32.0),
 
 # One fixture, clean shots: a scenario hides the collections it does not need
 # (the POR's middle ground on the crowded-scene question).
-HERO_HIDE = ("Torus_Flow", "Grid_Plates", "Cube_Bare", "Instanced_Cloud")
-ARROWS_HIDE = ("Grid_Plates", "Instanced_Cloud")
+# Every viewport shot is SOLO SUZANNE. A neighbouring object in frame reads as
+# scene clutter, and a half-cropped one reads as a mistake. The
+# partial-coverage claim lives in the panel's counts (3 objects - 2 carry
+# grad), which is where a reader can actually check it.
+SOLO = ("Torus_Flow", "Grid_Plates", "Cylinder_Bare", "Instanced_Cloud")
+HERO_HIDE = SOLO
+ARROWS_HIDE = SOLO
 
 MENU_PREFS = {"open_toplevel_delay": 0, "open_sublevel_delay": 0,
               "show_tooltips": False}
@@ -111,6 +116,8 @@ def stage_hero(ctx):
     _viz("VIZ_grad_arrows").attrviz_enabled = True
     _viz("VIZ_plate_random").attrviz_enabled = False
     out = {"enabled": ["VIZ_curv_surface", "VIZ_grad_arrows"]}
+    # Drop from scope AND hide: hiding alone leaves the overlay ink drawing.
+    out.update(_drop_from_scopes(HERO_HIDE))
     out.update(_hide(HERO_HIDE))
     return out
 
@@ -125,11 +132,49 @@ def stage_arrows_only(ctx):
     _viz("VIZ_curv_surface").attrviz_enabled = False
     _viz("VIZ_grad_arrows").attrviz_enabled = True
     _viz("VIZ_plate_random").attrviz_enabled = False
-    # Cube_Bare stays visible on purpose: it carries no grad, and the point of
+    # Cylinder_Bare stays visible on purpose: it carries no grad, and the point of
     # this shot is that a non-carrier is left untouched rather than hidden.
     out = {"enabled": ["VIZ_grad_arrows"]}
+    out.update(_drop_from_scopes(ARROWS_HIDE))
     out.update(_hide(ARROWS_HIDE))
+    out.update(_unmute("Suzanne_Measured"))
     return out
+
+
+def _unmute(name):
+    """Undo the Surface visualizer's solid mute.
+
+    Arrows are ADDITIVE — they belong on visible geometry, and the tableau
+    proves it: its Markers, Arrows and Tags cells all show the grey mesh, only
+    Surface goes to BOUNDS. The mute here is left over from the Surface
+    visualizer this scenario just switched off, and it is stashed in the
+    .blend as an ID property, so it survives the file load.
+
+    Use the addon's OWN restore rather than assigning display_type directly —
+    that also clears the stash, which is what a user toggling Enabled gets.
+    """
+    from attrviz import gpu_overlay
+    obj = bpy.data.objects[name]
+    gpu_overlay._restore_target_solid(obj)
+    return {"display_type": obj.display_type}
+
+
+def assert_visible_and_enabled(obj_name, names):
+    """Arrows must sit ON the geometry. A BOUNDS source mesh means the shot
+    shows a floating field of ink and no object — which is not what Arrows
+    does, and would misinform every reader."""
+    inner = assert_enabled_only(names)
+
+    def check(ctx):
+        out = inner(ctx)
+        dt = bpy.data.objects[obj_name].display_type
+        if dt in ("BOUNDS", "WIRE"):
+            raise AssertionError(
+                f"{obj_name} is {dt}; the source geometry is hidden, so this "
+                "shot would claim Arrows replaces the mesh. It does not.")
+        out["display_type"] = dt
+        return out
+    return check
 
 
 def assert_enabled_only(names):
@@ -143,7 +188,7 @@ def assert_enabled_only(names):
     return check
 
 
-TABLEAU_HIDE = ("Torus_Flow", "Grid_Plates", "Cube_Bare", "Instanced_Cloud")
+TABLEAU_HIDE = SOLO
 TABLEAU_VIEW = {"location": (0.0, 0.0, 0.15), "rotation_deg": (74.0, 0.0, 26.0),
                 "distance": 4.6}
 
@@ -165,6 +210,16 @@ def _drop_from_scopes(names):
                 coll.objects.unlink(obj)
                 dropped.append(f"{name}<-{coll.name}")
     return {"dropped_from_scope": dropped}
+
+
+def stage_noop(ctx):
+    """A filmstrip's stages do their own staging.
+
+    The pre-switch guard requires the frame to CHANGE before a cell is
+    accepted, so if `setup` has already put the scene in stage 0's state,
+    stage 0 is a no-op and the cell never settles. Leave the scene alone here.
+    """
+    return {}
 
 
 def stage_tableau(ctx):
@@ -411,7 +466,8 @@ SCENARIOS = [
         "window": WIN_STD,
         "prefs": PANEL_PREFS,
         "setup": stage_arrows_only,
-        "assertions": assert_enabled_only(["VIZ_grad_arrows"]),
+        "assertions": assert_visible_and_enabled(
+            "Suzanne_Measured", ["VIZ_grad_arrows"]),
         "shot": {"kind": "viewport", "crop": "WINDOW", "view": HERO_VIEW,
                  "overlays": CLEAN_OVERLAYS, "ticks": VIEW_TICKS,
                  "min_ink_px": 2000},
@@ -432,6 +488,24 @@ SCENARIOS = [
                  "viz": "VIZ_grad_arrows", "min_cell_px": 500},
         "gated": True,
         "doc": "README 'Visualization axes' — same attribute, every Type",
+    },
+    {
+        # The correlation shot: the same values as numbers and as ink, side by
+        # side. Neither half means much alone — a table of floats is not a
+        # shape, and a coloured monkey is not evidence.
+        "name": "strip_numbers_to_ink",
+        "blend": SCOPE_BLEND,
+        "window": (60, 60, 1180, 800),
+        "prefs": PANEL_PREFS,
+        "setup": stage_noop,
+        "assertions": assert_tableau,
+        "shot": {"kind": "filmstrip", "view": HERO_VIEW,
+                 "overlays": CLEAN_OVERLAYS, "ticks": VIEW_TICKS,
+                 "min_cell_px": 500,
+                 "stages": [("VIEWPORT", stage_hero),
+                            ("SPREADSHEET", stage_spreadsheet)]},
+        "gated": True,
+        "doc": "README 'What it is' — numbers and ink are the same data",
     },
     {
         # Not our panel. The contrast is the point.

@@ -16,7 +16,10 @@ along X so a scenario can frame one and hide the collections it does not need.
                      and Arrows have somewhere interesting to point
   Torus_Flow         grad (vector, Point) — unambiguous normals for Arrows
   Grid_Plates        plate_id (int, Face) — Face domain and categorical colour
-  Cube_Bare          nothing at all — proves partial coverage is honest
+  Cylinder_Bare      nothing at all — proves partial coverage is honest.
+                     Deliberately NOT a cube: a grey cube in a Blender
+                     screenshot reads as "the default cube nobody deleted",
+                     which is not the claim this object is making
   Instanced_Cloud    Instance domain only, mesh domains empty — the
                      "add Realize Instances" guidance, which has no test
                      and no doc today
@@ -186,8 +189,10 @@ def main():
                     lambda bm: bmesh.ops.create_grid(
                         bm, x_segments=6, y_segments=6, size=1.1),
                     (-3.4, 0.0, 0.0))
-    bare = mesh_obj("Cube_Bare",
-                    lambda bm: bmesh.ops.create_cube(bm, size=1.2),
+    bare = mesh_obj("Cylinder_Bare",
+                    lambda bm: bmesh.ops.create_cone(
+                        bm, cap_ends=True, cap_tris=False, segments=24,
+                        radius1=0.62, radius2=0.62, depth=1.5),
                     (0.0, 3.2, 0.0))
     cloud = mesh_obj("Instanced_Cloud",
                      lambda bm: bmesh.ops.create_icosphere(
@@ -198,7 +203,7 @@ def main():
     add_measure(torus_obj, scalar=False)
     add_face_ids(grid)
     add_instancer(cloud)
-    # Cube_Bare deliberately gets no modifier and no attributes.
+    # Cylinder_Bare deliberately gets no modifier and no attributes.
     bpy.context.view_layer.update()
 
     # --- scope 1: the default bucket, deliberately mixed coverage ----------
@@ -248,7 +253,7 @@ def main():
         print(f"  {name:20s} {n} obj / {len(vizzes)} viz")
     print()
     print("  Suzanne is in TWO scopes: grad Arrows and curv Surface at once.")
-    print("  Cube_Bare carries neither and is FIRST in attrvis.")
+    print("  Cylinder_Bare carries neither and is FIRST in attrvis.")
     print("  Instanced_Cloud is in NO scope — it exists for the menu shot.")
     print("=" * 70)
 

@@ -365,3 +365,58 @@ stop AttrViz drawing on it.
 
 Default `Tag Cap` is 10000. On 507 points that is a white mass. The scenario
 sets 24.
+
+---
+
+# Staging corrections, and one wrong diagnosis
+
+## The arrows shot was wrong, and my first explanation of it was too
+
+`viewport_arrows` showed a black bounding box and a floating field of ink, no
+geometry. I attributed that to AttrViz muting the source mesh for Arrows.
+
+**That was wrong, and the tableau I had already produced disproves it**: its
+Markers, Arrows and Tags cells all show the grey mesh; only Surface goes to
+BOUNDS. Arrows are additive — they belong on visible geometry.
+
+The real cause is ordering. `_MUTE_PROP` stashes `display_type` **into the
+.blend as an ID property**, and `_on_load_post` re-applies it on file open. The
+fixture is saved with a Surface visualizer enabled, so Suzanne loads muted. The
+scenario then disables that visualizer, but nothing had triggered the restore
+by capture time.
+
+Fix: call the addon's own `gpu_overlay._restore_target_solid()` rather than
+assigning `display_type` directly — that also clears the stash, which is what a
+user toggling Enabled gets. And `assert_visible_and_enabled` now **fails the
+shot** if the source object is BOUNDS or WIRE, so this cannot regress into a
+picture that quietly misinforms.
+
+Lesson: I had the disproving evidence on screen before I made the claim. Check
+the artefacts already produced before theorising about behaviour.
+
+## Solo geometry in every viewport shot
+
+Neighbouring objects read as scene clutter, and a half-cropped one reads as a
+mistake. All viewport shots now show **Suzanne alone** (`SOLO`), dropped from
+scope *and* hidden — hiding alone leaves the ink drawing.
+
+The partial-coverage claim therefore lives in the panel's counts, not in a
+viewport image. That is the better home for it anyway: `3 objects - 2 carry
+grad` is checkable, where "that grey thing has no arrows" is not.
+
+`Cube_Bare` is now `Cylinder_Bare`. A grey cube in a Blender screenshot reads
+as the default cube nobody deleted, which is not the claim the object is
+making.
+
+## `strip_numbers_to_ink` — the correlation shot
+
+A one-row filmstrip: the same data as numbers and as ink. `kind: "filmstrip"`
+generalises the tableau engine — cells come from a `stages` list of
+(label, callable) instead of from `DISPLAYS`, and `cols` is forced to the stage
+count so it stays a single row.
+
+**A filmstrip's stages must do their own staging.** The pre-switch guard
+requires the frame to change before a cell is accepted, so if the scenario's
+`setup` has already produced stage 0's state, stage 0 is a no-op and the cell
+never settles. That is exactly how it failed first time; `stage_noop` is the
+fix.

@@ -139,14 +139,15 @@ def content_pixels(rgb, thresh=0.06):
     return int((np.abs(rgb - median).max(axis=2) > thresh).sum())
 
 
-def compose_tableau(cell_paths, labels, gutter=6, label_scale=3):
+def compose_tableau(cell_paths, labels, gutter=6, label_scale=3, cols=None):
     """Grid the cells. Columns are derived, never hardcoded — adding a Display
     type must change this image without anyone editing a layout constant."""
     import math
     frames = [load_rgba(p)[0] for p in cell_paths]
     height, width = frames[0].shape[0], frames[0].shape[1]
     count = len(frames)
-    cols = int(math.ceil(math.sqrt(count)))
+    if cols is None:
+        cols = int(math.ceil(math.sqrt(count)))
     rows = int(math.ceil(count / float(cols)))
 
     canvas_h = rows * height + (rows + 1) * gutter
@@ -231,8 +232,10 @@ class Capture:
         self.stable = 0
         self.settle_polls = 0
         self.settle_from = self.ticks["shot"]
-        if self.shot["kind"] == "tableau":
-            self.displays = list(node_builder.DISPLAYS)
+        if self.shot["kind"] in ("tableau", "filmstrip"):
+            self.steps = ([lbl for lbl, _fn in self.shot["stages"]]
+                          if self.shot["kind"] == "filmstrip"
+                          else list(node_builder.DISPLAYS))
             self.cell_idx = 0
             self.cell_paths = []
             self.pending_set = True
@@ -268,7 +271,7 @@ class Capture:
         nothing.
         """
         if self.pending_set:
-            name = self.displays[self.cell_idx]
+            name = self.steps[self.cell_idx]
             # Hash the frame BEFORE the switch. Settling alone is not enough
             # here: immediately after setting the property nothing has
             # redrawn yet, so two identical polls read as "settled" and the
@@ -279,8 +282,7 @@ class Capture:
                 bpy.ops.screen.screenshot_area(filepath=pre)
             with open(pre, "rb") as fh:
                 self.pre_hash = hashlib.md5(fh.read()).hexdigest()
-            viz = bpy.data.objects[self.shot["viz"]]
-            viz.attrviz_display = name
+            self.apply_step(self.cell_idx)
             self.ctx["area"].tag_redraw()
             self.pending_set = False
             self.last_hash, self.stable, self.settle_polls = None, 0, 0
@@ -308,24 +310,35 @@ class Capture:
             self.cell_paths.append(probe)
             self.cell_idx += 1
             self.pending_set = True
-            if self.cell_idx >= len(self.displays):
+            if self.cell_idx >= len(self.steps):
                 self.finish_tableau()
             return
         if self.settle_polls > SETTLE_MAX_POLLS:
             raise RuntimeError(
-                f"cell {self.displays[self.cell_idx]!r} never settled, or "
+                f"cell {self.steps[self.cell_idx]!r} never settled, or "
                 "renders identically to the display before it")
 
+    def apply_step(self, index):
+        if self.shot["kind"] == "filmstrip":
+            _label, fn = self.shot["stages"][index]
+            report["assertions"].update(fn(self.ctx) or {})
+            # A stage may change the editor type, which invalidates regions.
+            self.ctx["regions"] = {
+                r.type: r for r in self.ctx["area"].regions}
+        else:
+            bpy.data.objects[self.shot["viz"]].attrviz_display =                 self.steps[index]
+
     def finish_tableau(self):
-        canvas, grid = compose_tableau(self.cell_paths, self.displays)
+        cols = len(self.steps) if self.shot["kind"] == "filmstrip" else None
+        canvas, grid = compose_tableau(self.cell_paths, self.steps, cols=cols)
         raw = os.path.join(OUT_DIR, self.scen["name"] + ".png")
         save_rgba(canvas, raw)
         report["grid"] = list(grid)
-        report["cells"] = list(self.displays)
+        report["cells"] = list(self.steps)
 
         min_ink = self.shot.get("min_cell_px", 0)
         per_cell = {}
-        for name, path in zip(self.displays, self.cell_paths):
+        for name, path in zip(self.steps, self.cell_paths):
             rgb = load_rgba(path)[0][:, :, :3]
             per_cell[name] = content_pixels(rgb)
         report["cell_content_px"] = per_cell
@@ -427,7 +440,8 @@ class Capture:
                 self.open_menu()
             elif t in plan.get("nudges", ()):
                 self.nudge(plan["nudges"].index(t))
-            elif t >= plan["shot"] and self.shot["kind"] == "tableau":
+            elif t >= plan["shot"] and self.shot["kind"] in (
+                    "tableau", "filmstrip"):
                 self.tableau_step(t)
                 if report["ok"]:
                     _finish()
