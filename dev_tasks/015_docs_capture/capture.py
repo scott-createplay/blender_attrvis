@@ -261,9 +261,15 @@ class Capture:
         self.settle_polls = 0
         self.settle_from = self.ticks["shot"]
         if self.shot["kind"] in ("tableau", "filmstrip"):
-            self.steps = ([lbl for lbl, _fn in self.shot["stages"]]
-                          if self.shot["kind"] == "filmstrip"
-                          else list(node_builder.DISPLAYS))
+            if self.shot["kind"] == "filmstrip":
+                self.steps = [lbl for lbl, _fn in self.shot["stages"]]
+            elif self.shot.get("matrix_styles"):
+                self.combos = [(st, d)
+                               for st in self.shot["matrix_styles"]
+                               for d in node_builder.DISPLAYS]
+                self.steps = [f"{st}  {d}" for st, d in self.combos]
+            else:
+                self.steps = list(node_builder.DISPLAYS)
             self.cell_idx = 0
             self.cell_paths = []
             self.pending_set = True
@@ -488,11 +494,24 @@ class Capture:
             # A stage may change the editor type, which invalidates regions.
             self.ctx["regions"] = {
                 r.type: r for r in self.ctx["area"].regions}
+        elif self.shot.get("matrix_styles"):
+            # Type and Colour are independent axes. Varying one while pinning
+            # the other taught that Surface *means* Heat, which is false.
+            style, display = self.combos[index]
+            viz = bpy.data.objects[self.shot["viz"]]
+            viz.attrviz_style = style
+            viz.attrviz_display = display
         else:
             bpy.data.objects[self.shot["viz"]].attrviz_display =                 self.steps[index]
 
     def finish_tableau(self):
-        cols = len(self.steps) if self.shot["kind"] == "filmstrip" else None
+        if self.shot["kind"] == "filmstrip":
+            cols = len(self.steps)
+        elif self.shot.get("matrix_styles"):
+            # One row per Colour, one column per Type.
+            cols = len(node_builder.DISPLAYS)
+        else:
+            cols = None
         canvas, grid = compose_tableau(self.cell_paths, self.steps, cols=cols)
         raw = os.path.join(OUT_DIR, self.scen["name"] + ".png")
         save_rgba(canvas, raw)

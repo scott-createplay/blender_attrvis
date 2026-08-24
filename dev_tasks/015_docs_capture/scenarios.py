@@ -67,7 +67,14 @@ HERO_VIEW = {"location": (0.0, 0.0, 0.15), "rotation_deg": (72.0, 0.0, 32.0),
 # scene clutter, and a half-cropped one reads as a mistake. The
 # partial-coverage claim lives in the panel's counts (3 objects - 2 carry
 # grad), which is where a reader can actually check it.
-SOLO = ("Torus_Flow", "Grid_Plates", "Cylinder_Bare", "Instanced_Cloud")
+BATCH = tuple("Batch_%02d" % (i + 1) for i in range(6))
+SOLO = (("Torus_Flow", "Grid_Plates", "Cylinder_Bare", "Instanced_Cloud")
+        + BATCH)
+# Framed on the shelf of tiles, not on Suzanne.
+BATCH_VIEW = {"location": (-0.5, -3.6, 0.0), "rotation_deg": (68.0, 0.0, 4.0),
+              "distance": 9.0}
+NOT_BATCH = ("Suzanne_Measured", "Torus_Flow", "Grid_Plates",
+             "Cylinder_Bare", "Instanced_Cloud")
 HERO_HIDE = SOLO
 ARROWS_HIDE = SOLO
 
@@ -114,10 +121,7 @@ def stage_hero(ctx):
     for other in bpy.context.view_layer.objects:
         other.select_set(False)
     bpy.context.view_layer.objects.active = None
-    _viz("VIZ_curv_surface").attrviz_enabled = True
-    _viz("VIZ_grad_arrows").attrviz_enabled = True
-    _viz("VIZ_plate_random").attrviz_enabled = False
-    out = {"enabled": ["VIZ_curv_surface", "VIZ_grad_arrows"]}
+    out = _only_viz(["VIZ_curv_surface", "VIZ_grad_arrows"])
     # Drop from scope AND hide: hiding alone leaves the overlay ink drawing.
     out.update(_drop_from_scopes(HERO_HIDE))
     out.update(_hide(HERO_HIDE))
@@ -131,12 +135,7 @@ def stage_arrows_only(ctx):
     for other in bpy.context.view_layer.objects:
         other.select_set(False)
     bpy.context.view_layer.objects.active = None
-    _viz("VIZ_curv_surface").attrviz_enabled = False
-    _viz("VIZ_grad_arrows").attrviz_enabled = True
-    _viz("VIZ_plate_random").attrviz_enabled = False
-    # Cylinder_Bare stays visible on purpose: it carries no grad, and the point of
-    # this shot is that a non-carrier is left untouched rather than hidden.
-    out = {"enabled": ["VIZ_grad_arrows"]}
+    out = _only_viz(["VIZ_grad_arrows"])
     out.update(_drop_from_scopes(ARROWS_HIDE))
     out.update(_hide(ARROWS_HIDE))
     out.update(_unmute("Suzanne_Measured"))
@@ -258,6 +257,87 @@ def _active_caption(extra="", _unused=None):
     return hud
 
 
+def _only_viz(names):
+    """Exactly these visualizers on, everything else off."""
+    for obj in bpy.data.objects:
+        if obj.name.startswith("VIZ_"):
+            obj.attrviz_enabled = obj.name in names
+    return {"enabled": list(names)}
+
+
+def stage_batch(ctx):
+    """One visualizer over six objects, all on one shared ramp."""
+    for other in bpy.context.view_layer.objects:
+        other.select_set(False)
+    bpy.context.view_layer.objects.active = None
+    out = _only_viz(["VIZ_wear_batch"])
+    out.update(_drop_from_scopes(NOT_BATCH))
+    out.update(_hide(NOT_BATCH))
+    return out
+
+
+def _solo_suzanne():
+    for other in bpy.context.view_layer.objects:
+        other.select_set(False)
+    bpy.context.view_layer.objects.active = None
+    out = _drop_from_scopes(SOLO)
+    out.update(_hide(SOLO))
+    return out
+
+
+def stage_color_heat(ctx):
+    out = _solo_suzanne()
+    out.update(_only_viz(["VIZ_curv_surface"]))
+    _viz("VIZ_curv_surface").attrviz_style = "Heat"
+    return out
+
+
+def stage_color_rgb(ctx):
+    """grad is a vector, so RGB maps its channels straight to colour."""
+    viz = _viz("VIZ_grad_arrows")
+    viz.attrviz_style = "RGB"
+    viz.attrviz_display = "Surface"
+    return _only_viz(["VIZ_grad_arrows"])
+
+
+def stage_color_random(ctx):
+    """face_id is an int, so it gets a stable hash colour per id."""
+    return _only_viz(["VIZ_faceid_surface"])
+
+
+def stage_domain_point(ctx):
+    for other in bpy.context.view_layer.objects:
+        other.select_set(False)
+    bpy.context.view_layer.objects.active = None
+    out = _only_viz(["VIZ_curv_surface"])
+    out.update(_drop_from_scopes(SOLO))
+    out.update(_hide(SOLO))
+    out.update(_unmute("Suzanne_Measured"))
+    return out
+
+
+def stage_domain_face(ctx):
+    out = _only_viz(["VIZ_faceid_surface"])
+    return out
+
+
+def assert_batch_spread(ctx):
+    """The outlier has to actually sit outside the others, or the picture
+    claims something it cannot show."""
+    import attrviz as av
+    carriers, bare = [], []
+    for name in BATCH:
+        obj = bpy.data.objects[name]
+        by, _ = av.attributes_by_domain(obj)
+        names = [n for n, _t in by.get("Point", [])]
+        (carriers if "wear" in names else bare).append(name)
+    if len(carriers) < 4 or not bare:
+        raise AssertionError(
+            f"batch needs carriers and at least one non-carrier; "
+            f"carriers={carriers} bare={bare}")
+    return {"carriers": carriers, "non_carriers": bare}
+
+
 def stage_noop(ctx):
     """A filmstrip's stages do their own staging.
 
@@ -279,18 +359,20 @@ def stage_tableau(ctx):
     for other in bpy.context.view_layer.objects:
         other.select_set(False)
     bpy.context.view_layer.objects.active = None
-    _viz("VIZ_grad_arrows").attrviz_enabled = True
-    _viz("VIZ_curv_surface").attrviz_enabled = False
-    _viz("VIZ_plate_random").attrviz_enabled = False
-    out = {"attribute": "grad", "viz": "VIZ_grad_arrows"}
+    out = _only_viz(["VIZ_grad_arrows"])
+    out["attribute"] = "grad"
+    # A vector reads as RGB; Heat wants a scalar. Pin Colour so the Type
+    # tableau varies ONE axis honestly rather than implying Colour follows
+    # Type.
+    _viz("VIZ_grad_arrows").attrviz_style = "RGB"
     out.update(_drop_from_scopes(TABLEAU_HIDE))
     out.update(_hide(TABLEAU_HIDE))
     # Tags defaults to a cap of 10000. On 507 points that is a white mass, not
     # a readable label — legible Tags need a cap the eye can follow.
     from attrviz import node_builder
     md = next(m for m in _viz("VIZ_grad_arrows").modifiers if m.type == 'NODES')
-    node_builder.set_input(md, "Tag Cap", 24)
-    out["tag_cap"] = 24
+    node_builder.set_input(md, "Tag Cap", 8)
+    out["tag_cap"] = 8
     return out
 
 
@@ -416,13 +498,23 @@ def assert_attrs_on_active(ctx):
     return {"active": obj.name, "domains": populated}
 
 
+def assert_two_scopes_atleast(ctx):
+    import attrviz as av
+    groups = av.visualizers_by_scope(bpy.context.scene)
+    items = groups.items() if hasattr(groups, "items") else groups
+    named = [[getattr(k, "name", str(k)), len(v)] for k, v in items]
+    if len(named) < 2:
+        raise AssertionError(f"expected several scope groups, got {named}")
+    return {"groups": named}
+
+
 def assert_two_scopes(ctx):
     import attrviz as av
     groups = av.visualizers_by_scope(bpy.context.scene)
     items = groups.items() if hasattr(groups, "items") else groups
     named = [[getattr(k, "name", str(k)), len(v)] for k, v in items]
-    if len(named) != 3:
-        raise AssertionError(f"expected 3 scope groups, got {named}")
+    if len(named) != 5:
+        raise AssertionError(f"expected 5 scope groups, got {named}")
     return {"groups": named}
 
 
@@ -591,6 +683,58 @@ SCENARIOS = [
                             ("SPREADSHEET", stage_spreadsheet)]},
         "gated": True,
         "doc": "README 'What it is' — numbers and ink are the same data",
+    },
+    {
+        # One visualizer, six objects, one shared ramp — and one tile that is
+        # plainly hotter than the rest.
+        "name": "viewport_scope_compare",
+        "blend": SCOPE_BLEND,
+        "window": (60, 60, 1500, 760),
+        "prefs": PANEL_PREFS,
+        "setup": stage_batch,
+        "assertions": assert_batch_spread,
+        "shot": {"kind": "viewport", "crop": "WINDOW", "view": BATCH_VIEW,
+                 "overlays": CLEAN_OVERLAYS, "ticks": VIEW_TICKS,
+                 "min_ink_px": 6000,
+                 "hud": _viz_caption("VIZ_wear_batch")},
+        "gated": True,
+        "doc": "README - one visualizer, many objects",
+    },
+    {
+        # Same object, two domains. A Face attribute is flat per facet; a
+        # Point attribute is smooth. Two different objects would not show it.
+        "name": "strip_domains",
+        "blend": SCOPE_BLEND,
+        "window": (60, 60, 1500, 780),
+        "prefs": PANEL_PREFS,
+        "setup": stage_noop,
+        "assertions": assert_two_scopes_atleast,
+        "shot": {"kind": "filmstrip", "view": HERO_VIEW,
+                 "overlays": CLEAN_OVERLAYS, "ticks": VIEW_TICKS,
+                 "min_cell_px": 500,
+                 "stages": [("POINT  CURV", stage_domain_point),
+                            ("FACE  FACE ID", stage_domain_face)]},
+        "gated": True,
+        "doc": "README - domain",
+    },
+    {
+        # Colour is chosen by the DATA, not by taste: Heat needs a scalar,
+        # RGB needs a vector, Random needs an id. One object, three
+        # attributes, three modes — the honest way to show it.
+        "name": "strip_colors",
+        "blend": SCOPE_BLEND,
+        "window": (60, 60, 1560, 720),
+        "prefs": PANEL_PREFS,
+        "setup": stage_noop,
+        "assertions": assert_two_scopes_atleast,
+        "shot": {"kind": "filmstrip", "view": HERO_VIEW,
+                 "overlays": CLEAN_OVERLAYS, "ticks": VIEW_TICKS,
+                 "min_cell_px": 500,
+                 "stages": [("HEAT  CURV  FLOAT", stage_color_heat),
+                            ("RGB  GRAD  VECTOR", stage_color_rgb),
+                            ("RANDOM  FACE ID  INT", stage_color_random)]},
+        "gated": True,
+        "doc": "README - Colour follows the data type",
     },
     {
         # Not our panel. The contrast is the point.

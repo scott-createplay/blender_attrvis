@@ -122,21 +122,63 @@ def add_measure(obj, scalar=True):
     return md
 
 
-def add_face_ids(obj):
-    """plate_id: an INT on the FACE domain — categorical, so the overlay
-    colours it by hash rather than through a ramp."""
-    ng, gin, gout = _tree(f"Plates_{obj.name}")
+def add_face_ids(obj, name="plate_id"):
+    """An INT on the FACE domain — categorical, so the overlay colours it by
+    hash rather than through a ramp.
+
+    Suzanne gets one too, so the docs can show Point and Face on the SAME
+    object: a face attribute is flat per facet, a point attribute is smooth.
+    Two objects side by side would not prove that.
+    """
+    ng, gin, gout = _tree(f"Faces_{name}_{obj.name}")
     idx = ng.nodes.new("GeometryNodeInputIndex")
     idx.location = (-450, -220)
     st = ng.nodes.new("GeometryNodeStoreNamedAttribute")
     st.location = (0, 0)
     st.data_type = 'INT'
     st.domain = 'FACE'
-    st.inputs["Name"].default_value = "plate_id"
+    st.inputs["Name"].default_value = name
     ng.links.new(gin.outputs[0], st.inputs["Geometry"])
     ng.links.new(idx.outputs["Index"], st.inputs["Value"])
     ng.links.new(st.outputs["Geometry"], gout.inputs[0])
-    md = obj.modifiers.new("Plates", 'NODES')
+    md = obj.modifiers.new(f"Faces_{name}", 'NODES')
+    md.node_group = ng
+    return md
+
+
+def add_wear(obj, boost=1.0):
+    """`wear`: a FLOAT on Point, scaled per object.
+
+    The batch exists for one claim — one visualizer over many objects puts them
+    all on a SHARED ramp, so the odd one out is visible without clicking
+    through them. That only reads if one object's values genuinely sit outside
+    the others'.
+    """
+    ng, gin, gout = _tree(f"Wear_{obj.name}")
+    pos = ng.nodes.new("GeometryNodeInputPosition")
+    pos.location = (-450, -300)
+    sep = ng.nodes.new("ShaderNodeSeparateXYZ")
+    sep.location = (-280, -300)
+    add = ng.nodes.new("ShaderNodeMath")
+    add.location = (-120, -300)
+    add.operation = 'ADD'
+    add.inputs[1].default_value = 0.42
+    mul = ng.nodes.new("ShaderNodeMath")
+    mul.location = (30, -300)
+    mul.operation = 'MULTIPLY'
+    mul.inputs[1].default_value = float(boost)
+    st = ng.nodes.new("GeometryNodeStoreNamedAttribute")
+    st.location = (220, 0)
+    st.data_type = 'FLOAT'
+    st.domain = 'POINT'
+    st.inputs["Name"].default_value = "wear"
+    ng.links.new(gin.outputs[0], st.inputs["Geometry"])
+    ng.links.new(pos.outputs["Position"], sep.inputs["Vector"])
+    ng.links.new(sep.outputs["Z"], add.inputs[0])
+    ng.links.new(add.outputs["Value"], mul.inputs[0])
+    ng.links.new(mul.outputs["Value"], st.inputs["Value"])
+    ng.links.new(st.outputs["Geometry"], gout.inputs[0])
+    md = obj.modifiers.new("Wear", 'NODES')
     md.node_group = ng
     return md
 
@@ -199,7 +241,24 @@ def main():
                          bm, subdivisions=1, radius=0.9),
                      (3.4, 3.2, 0.0))
 
+    # Suzanne carries BOTH a Point and a Face attribute, so one object can
+    # demonstrate what changing domain does.
     add_measure(suzanne, scalar=True)
+    add_face_ids(suzanne, name="face_id")
+
+    # The batch: six tiles on one shelf. Four ordinary, one worn well past the
+    # rest, one that never got the attribute at all.
+    batch = []
+    for i in range(6):
+        obj = mesh_obj(f"Batch_{i + 1:02d}",
+                       lambda bm: bmesh.ops.create_icosphere(
+                           bm, subdivisions=2, radius=0.42),
+                       (-3.9 + i * 1.35, -3.6, 0.0))
+        batch.append(obj)
+    for i, obj in enumerate(batch):
+        if i == 5:
+            continue          # Batch_06 carries nothing: the coverage story.
+        add_wear(obj, boost=2.4 if i == 3 else 1.0)
     add_measure(torus_obj, scalar=False)
     add_face_ids(grid)
     add_instancer(cloud)
@@ -232,6 +291,22 @@ def main():
         style="Random", display="Surface")
     viz_plates.name = "VIZ_plate_random"
 
+    # --- scope 4: the batch, one visualizer over all of them --------------
+    batch_coll = av.new_scope_collection(bpy.context, "attrvis_batch")
+    av._link_to_watch(bpy.context, batch, batch_coll)
+    viz_wear = av.add_visualizer(
+        bpy.context, scope=batch_coll, attribute="wear", domain="Point",
+        style="Heat", display="Surface")
+    viz_wear.name = "VIZ_wear_batch"
+
+    # A second visualizer on Suzanne's FACE attribute, for the domain shot.
+    face_coll = av.new_scope_collection(bpy.context, "attrvis_faces")
+    av._link_to_watch(bpy.context, [suzanne], face_coll)
+    viz_face = av.add_visualizer(
+        bpy.context, scope=face_coll, attribute="face_id", domain="Face",
+        style="Random", display="Surface")
+    viz_face.name = "VIZ_faceid_surface"
+
     av.set_active_scope(bpy.context, watch)
     bpy.context.view_layer.update()
 
@@ -239,7 +314,7 @@ def main():
     print("=" * 70)
     print("SCENE BUILT — what a scenario should assert")
     print("=" * 70)
-    for obj in (suzanne, torus_obj, grid, bare, cloud):
+    for obj in (suzanne, torus_obj, grid, bare, cloud) + tuple(batch[:1]):
         by, _ = av.attributes_by_domain(obj)
         populated = {d: [n for n, _t in v] for d, v in by.items() if v}
         print(f"  {obj.name:18s} {populated or 'no attributes'}")
