@@ -156,6 +156,17 @@ def main():
     args = ap.parse_args()
 
     exe = blender_exe()
+    # The harness loads the REPO via sys.path, so its results describe the
+    # repo and not whatever Blender has installed. Say so when they differ,
+    # or a green run here reads as "the addon works" when it does not.
+    try:
+        sys.path.insert(0, REPO)
+        import install as _install  # noqa: E402
+        if _install.check(quiet=True):
+            print("NOTE: the installed extension differs from this repo. "
+                  "These captures test the repo. Run: python install.py")
+    except Exception:
+        pass
     os.makedirs(OUT, exist_ok=True)
     chosen = ([scenarios.by_name(n) for n in args.names]
               if args.names else scenarios.SCENARIOS)

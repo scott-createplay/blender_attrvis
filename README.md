@@ -265,15 +265,21 @@ Instances to unpack.*
 
 ## Install
 
-Grab a release zip (or build one, below), then:
+Grab a release zip, then:
 **Edit → Preferences → Get Extensions → ⌄ → Install from Disk…**
 
-Build from source:
+From source:
 
 ```
-blender --command extension build --source-dir attrviz --output-dir build
-blender --command extension install-file --repo user_default --enable build/attrviz-<version>.zip
+python install.py            # build, install, and verify
+python install.py --sync     # copy source in place (fast dev loop)
+python install.py --check    # verify the install matches the repo
 ```
+
+Blender runs the *installed* copy, never the repo, so a passing test run
+says nothing about what is loaded in the app. `--check` is what tells you
+whether the two agree; restart Blender after either install path, because a
+module that is already imported stays imported.
 
 Developed against **Blender 5.0+** (tested on 5.0.1 and 5.2.0). Current addon
 version: **0.5.12**.
